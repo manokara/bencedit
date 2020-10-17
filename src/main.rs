@@ -29,16 +29,21 @@ pub fn main() {
              .long("skip-not-found")
              .short("N"))
         .arg(Arg::with_name("files")
-             .multiple(true))
+             .multiple(true)
+             .required(true))
         .get_matches();
 
     if args.is_present("batch") {
-        batch::batch(args.values_of("files").unwrap().collect());
+        if let Err(e) = batch::batch(args.values_of("files").unwrap().collect()) {
+            eprintln!("Error: {}", e);
+        }
     } else {
         if args.occurrences_of("files") > 1 {
             println!("Warning: Many files were passed to interactive mode, only the first one will be loaded.")
         }
 
-        interactive::interactive(args.value_of("files").unwrap());
+        if let Err(e) = interactive::interactive(args.value_of("files").unwrap()) {
+            eprintln!("Error: {}", e);
+        }
     }
 }
