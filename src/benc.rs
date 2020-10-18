@@ -18,7 +18,7 @@ enum Token {
     Colon,
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 enum State {
     Root,
     Dict,
@@ -45,6 +45,14 @@ enum State {
     Done,
 }
 
+#[derive(Debug, PartialEq)]
+enum DisplayState {
+    Root,
+    Dict,
+    List,
+    Done,
+}
+
 #[derive(Debug)]
 pub enum Error {
     Io(IoError),
@@ -65,6 +73,8 @@ pub enum Value {
     DictRef(Rc<RefCell<BTreeMap<String, Value>>>),
     ListRef(Rc<RefCell<Vec<Value>>>),
 }
+
+pub struct ValueDisplay<'a>(&'a Value, usize);
 
 pub fn load(stream: &mut (impl Read + Seek)) -> Result<Value, Error> {
     let file_size = stream.seek(SeekFrom::End(0))?;
@@ -566,6 +576,205 @@ impl Value {
             Value::ListRef(rc) => Value::List(rc.borrow().clone()),
             a => a,
         }
+    }
+
+    /// Is the current value a reference?
+    pub fn is_ref(&self) -> bool {
+        matches!(self, Value::DictRef(_) | Value::ListRef(_))
+    }
+
+    /// Is the current value an int?
+    pub fn is_int(&self) -> bool {
+        matches!(self, Value::Int(_))
+    }
+
+    /// Is the current value a str?
+    pub fn is_str(&self) -> bool {
+        matches!(self, Value::Str(_))
+    }
+
+    /// Is the current value a dict?
+    pub fn is_dict(&self) -> bool {
+        matches!(self, Value::Dict(_))
+    }
+
+    /// Is the current value a list?
+    pub fn is_list(&self) -> bool {
+        matches!(self, Value::List(_))
+    }
+
+    pub fn to_i64(&self) -> Option<i64> {
+        if let Value::Int(v) = self {
+            Some(*v)
+        } else {
+            None
+        }
+    }
+
+    pub fn to_str(&self) -> Option<&str> {
+        if let Value::Str(s) = self {
+            Some(s.as_str())
+        } else {
+            None
+        }
+    }
+
+    pub fn to_map(&self) -> Option<&BTreeMap<String, Value>> {
+        if let Value::Dict(map) = self {
+            Some(map)
+        } else {
+            None
+        }
+    }
+
+    pub fn to_vec(&self) -> Option<&Vec<Value>> {
+        if let Value::List(v) = self {
+            Some(v)
+        } else {
+            None
+        }
+    }
+}
+
+impl<'a> ValueDisplay<'a> {
+    pub fn new(root: &'a Value, indent_size: usize) -> Self {
+        Self(root, indent_size)
+    }
+
+    pub fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        let mut runs = 0;
+        let mut indent = 0;
+        let mut state = DisplayState::Root;
+        let mut next_state = Vec::new();
+        let mut dict_stack = Vec::new();
+        let mut list_stack = Vec::new();
+        let ValueDisplay(root, indent_size) = self;
+
+
+        while state != DisplayState::Done {
+            if runs > 100 {
+                break;
+            }
+
+            match state {
+                DisplayState::Root => {
+                    if let Some(i) = root.to_i64() {
+                        write!(f, "{}", i)?;
+                        state = DisplayState::Done;
+                    } else if let Some(s) = root.to_str() {
+                        write!(f, "{:?}", s)?;
+                        state = DisplayState::Done;
+                    } else if let Some(m) = root.to_map() {
+                        write!(f, "{{\n")?;
+                        dict_stack.push(m.iter().peekable());
+                        write!(f, "{:indent$}", "", indent = indent * indent_size)?;
+                        indent += 1;
+                        state = DisplayState::Dict;
+                        next_state.push(DisplayState::Done);
+                    } else if let Some(v) = root.to_vec() {
+                        write!(f, "[")?;
+                        list_stack.push(v.iter().peekable());
+                        state = DisplayState::List;
+                        next_state.push(DisplayState::Done);
+                    } else {
+                        return Err(fmt::Error);
+                    }
+                }
+
+                DisplayState::Dict => {
+                    let it = dict_stack.last_mut().unwrap();
+                    let next = it.next();
+
+                    if let Some((key, val)) = next {
+                        write!(f, "{:indent$}", "", indent = indent * indent_size)?;
+                        write!(f, "\"{}\": ", key)?;
+
+                        if let Some(i) = val.to_i64() {
+                            write!(f, "{}", i)?;
+                            write!(f, ",\n")?;
+                        } else if let Some(s) = val.to_str() {
+                            write!(f, "{:?}", s)?;
+                            write!(f, ",\n")?;
+                        } else if let Some(m) = val.to_map() {
+                            write!(f, "{{\n")?;
+                            dict_stack.push(m.iter().peekable());
+                            indent += 1;
+                            next_state.push(DisplayState::Dict);
+                        } else if let Some(v) = val.to_vec() {
+                            write!(f, "[")?;
+                            list_stack.push(v.iter().peekable());
+                            state = DisplayState::List;
+                            next_state.push(DisplayState::Dict);
+                        } else {
+                            return Err(fmt::Error);
+                        }
+
+                    } else {
+                        indent -= 1;
+                        write!(f, "{:indent$}", "", indent = indent * indent_size)?;
+                        write!(f, "}}")?;
+                        let _ = dict_stack.pop().ok_or(fmt::Error)?;
+                        state = next_state.pop().ok_or(fmt::Error)?;
+
+                        if state == DisplayState::Dict {
+                            write!(f, ",\n")?;
+                        }
+                    }
+                }
+
+                DisplayState::List => {
+                    let it = list_stack.last_mut().unwrap();
+                    let next = it.next();
+                    let is_last = it.peek().is_none();
+
+                    if let Some(val) = next {
+                        if let Some(i) = val.to_i64() {
+                            write!(f, "{}", i)?;
+                        } else if let Some(s) = val.to_str() {
+                            write!(f, "{:?}", s)?;
+                        } else if let Some(m) = val.to_map() {
+                            write!(f, "{{\n")?;
+                            dict_stack.push(m.iter().peekable());
+                            indent += 1;
+                            state = DisplayState::Dict;
+                            next_state.push(DisplayState::List);
+                        } else if let Some(v) = val.to_vec() {
+                            write!(f, "[")?;
+                            list_stack.push(v.iter().peekable());
+                            next_state.push(DisplayState::List);
+                        } else {
+                            return Err(fmt::Error);
+                        }
+
+                        if !is_last {
+                            write!(f, ", ")?;
+                        }
+                    } else {
+                        write!(f, "]")?;
+                        let _ = list_stack.pop().ok_or(fmt::Error)?;
+                        state = next_state.pop().ok_or(fmt::Error)?;
+
+                        if state == DisplayState::Dict {
+                            write!(f, ",\n")?;
+                        }
+                    }
+                }
+
+                // Done
+                _ => unreachable!(),
+            }
+
+            runs += 1;
+        }
+
+        write!(f, "\nFinished display with {} runs", runs)?;
+        Ok(())
+    }
+}
+
+impl fmt::Display for Value {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        ValueDisplay::new(self, 2).fmt(f)
     }
 }
 

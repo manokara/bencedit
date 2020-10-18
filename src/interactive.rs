@@ -15,6 +15,9 @@ enum CmdError {
     ArgUnknownEscape(usize, char),
     ArgTrailingEscape,
     ArgEOL,
+    ArgCount(usize),
+    ArgCountMin(usize),
+    ArgCountMax(usize),
 }
 
 struct State {
@@ -64,12 +67,27 @@ pub fn interactive<P>(file: P) -> Result<(), Error> where P: AsRef<Path> {
     Ok(())
 }
 
-fn interactive_cmd(_state: &mut State, cmd: String, argbuf: &str) -> Result<bool, CmdError> {
+fn interactive_cmd(state: &mut State, cmd: String, argbuf: &str) -> Result<bool, CmdError> {
     let args = parse_args(argbuf)?;
 
     Ok(match cmd.as_ref() {
-        "quit" | "exit" | "q" => false,
+        "show" => {
+            if args.len() > 1 {
+                return Err(CmdError::ArgCountMax(1));
+            }
 
+            let data = state.data.as_ref().unwrap();
+
+            if let Some(arg) = args.iter().next() {
+                println!("TODO");
+            } else {
+                println!("{}", data);
+            }
+
+            true
+        }
+
+        "quit" | "exit" | "q" => false,
         _ => return Err(CmdError::UnknownCommand(cmd)),
     })
 }
@@ -171,6 +189,9 @@ impl fmt::Display for CmdError {
             Self::ArgUnknownEscape(pos, c) => write!(f, "Unknown escape character '{}' at {}", c, pos + 1),
             Self::ArgTrailingEscape => write!(f, "Trailing escape character"),
             Self::ArgEOL => write!(f, "Reached end of line trying to match quote"),
+            Self::ArgCount(n) => write!(f, "Expected {} arguments", n),
+            Self::ArgCountMin(n) => write!(f, "Expected at least {} arguments", n),
+            Self::ArgCountMax(n) => write!(f, "Expected at most {} arguments", n),
         }
     }
 }
