@@ -3,11 +3,11 @@ use std::{
     io::{stdin, stdout, Error as IoError, Write},
     path::{Path, PathBuf},
 };
+use crate::benc::Value as BencValue;
 
 pub enum Error {
     Io(IoError),
-    InvalidFile,
-    EmptyFile,
+    InvalidFile(String),
 }
 
 enum CmdError {
@@ -19,6 +19,7 @@ enum CmdError {
 
 struct State {
     path: PathBuf,
+    data: Option<BencValue>,
 }
 
 pub fn interactive<P>(file: P) -> Result<(), Error> where P: AsRef<Path> {
@@ -65,7 +66,6 @@ pub fn interactive<P>(file: P) -> Result<(), Error> where P: AsRef<Path> {
 
 fn interactive_cmd(_state: &mut State, cmd: String, argbuf: &str) -> Result<bool, CmdError> {
     let args = parse_args(argbuf)?;
-    eprintln!("cmd: {}, argbuf: {:?}, args: {:?}", cmd, argbuf, args);
 
     Ok(match cmd.as_ref() {
         "quit" | "exit" | "q" => false,
@@ -135,6 +135,7 @@ impl State {
     pub fn new<P: Into<PathBuf>>(path: P) -> Result<Self, Error> {
         let mut me = Self {
             path: path.into(),
+            data: None,
         };
 
         me.reload()?;
@@ -143,9 +144,15 @@ impl State {
 
     pub fn reload(&mut self) -> Result<(), Error> {
         use std::fs::File;
+        use crate::benc::load;
 
-        let mut _fp = File::open(&self.path)?;
+        let mut fp = File::open(&self.path)?;
         println!("Loading {}", self.path.display());
+
+        match load(&mut fp) {
+            Ok(v) => self.data = Some(v),
+            Err(e) => return Err(Error::InvalidFile(format!("{}", e))),
+        }
 
         Ok(())
     }
@@ -172,8 +179,7 @@ impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
             Self::Io(e) => write!(f, "IO Error: {}", e),
-            Self::InvalidFile => write!(f, "File is invalid"),
-            Self::EmptyFile => write!(f, "No structures defined - file is empty!"),
+            Self::InvalidFile(s) => write!(f, "File is invalid - {}", s),
         }
     }
 }
