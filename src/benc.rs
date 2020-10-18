@@ -64,13 +64,14 @@ pub enum Error {
     BigInt,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum Value {
     Int(i64),
     Str(String),
-    Dict(BTreeMap<String, Value>),
+    Bytes(Vec<u8>),
+    Dict(BTreeMap<Value, Value>),
     List(Vec<Value>),
-    DictRef(Rc<RefCell<BTreeMap<String, Value>>>),
+    DictRef(Rc<RefCell<BTreeMap<Value, Value>>>),
     ListRef(Rc<RefCell<Vec<Value>>>),
 }
 
@@ -90,9 +91,9 @@ pub fn load(stream: &mut (impl Read + Seek)) -> Result<Value, Error> {
     let mut buf_index = 0usize;
     let mut state = State::Root;
     let mut next_state = Vec::new();
-    let mut buf = String::new();
-    let mut buf_chars = buf.chars().peekable();
-    let mut buf_str = String::new();
+    let mut buf = Vec::new();
+    let mut buf_chars = buf.iter().peekable();
+    let mut buf_str = Vec::new();
     let mut buf_str_remainder = 0u64;
     let mut buf_int = String::new();
     let mut key_stack = Vec::new();
@@ -109,8 +110,8 @@ pub fn load(stream: &mut (impl Read + Seek)) -> Result<Value, Error> {
 
         if real_index >= (file_index + buf.len() as u64) && real_index < file_size {
             buf.clear();
-            stream.take(CHUNK_SIZE).read_to_string(&mut buf)?;
-            buf_chars = buf.chars().peekable();
+            stream.take(CHUNK_SIZE).read_to_end(&mut buf)?;
+            buf_chars = buf.iter().peekable();
             file_index += buf_index as u64;
             buf_index = 0;
         }
@@ -126,7 +127,7 @@ pub fn load(stream: &mut (impl Read + Seek)) -> Result<Value, Error> {
 
         match state {
             State::Root => {
-                let c = *buf_chars.peek().unwrap();
+                let c = **buf_chars.peek().unwrap();
                 #[cfg(test)]
                 eprintln!("c = {}", c);
 
@@ -172,7 +173,10 @@ pub fn load(stream: &mut (impl Read + Seek)) -> Result<Value, Error> {
                     }
 
                     // End, Colon
-                    Ok(a) => return Err(Error::Syntax(real_index as usize, format!("Unexpected '{}' token", Into::<char>::into(a)))),
+                    Ok(a) => return Err(
+                        Error::Syntax(real_index as usize,
+                                      format!("Unexpected '{}' token", Into::<u8>::into(a) as char))
+                    ),
                 }
             }
 
@@ -188,7 +192,7 @@ pub fn load(stream: &mut (impl Read + Seek)) -> Result<Value, Error> {
                     state = State::Str;
                     next_state.push(State::DictKey);
                 } else {
-                    key_stack[dict_i as usize] = Some(buf_str.clone());
+                    key_stack[dict_i as usize] = Some(str_or_bytes(buf_str.clone()));
                     buf_str.clear();
                     state = State::DictVal;
                 }
@@ -196,7 +200,7 @@ pub fn load(stream: &mut (impl Read + Seek)) -> Result<Value, Error> {
 
             // Read dict value
             State::DictVal => {
-                let c = *buf_chars.peek().ok_or(Error::Eof)?;
+                let c = **buf_chars.peek().ok_or(Error::Eof)?;
 
                 match c.try_into() {
                     // End of dict
@@ -258,7 +262,7 @@ pub fn load(stream: &mut (impl Read + Seek)) -> Result<Value, Error> {
 
             // Process current dict value as str
             State::DictValStr => {
-                val_stack[dict_i as usize] = Some(Value::Str(buf_str.clone()));
+                val_stack[dict_i as usize] = Some(str_or_bytes(buf_str.clone()));
                 buf_str.clear();
                 state = State::DictFlush;
             }
@@ -266,7 +270,7 @@ pub fn load(stream: &mut (impl Read + Seek)) -> Result<Value, Error> {
             // Process current dict value as int
             State::DictValInt => {
                 // Unwrap here because Int state already checks for EOF
-                let c = buf_chars.next().unwrap();
+                let c = *buf_chars.next().unwrap();
 
                 if c != Token::End.into() {
                     return Err(Error::Syntax(real_index as usize, "Expected 'e' token".into()));
@@ -307,7 +311,7 @@ pub fn load(stream: &mut (impl Read + Seek)) -> Result<Value, Error> {
                 let val = val_stack[dict_i as usize].clone().unwrap().unref();
                 dict_stack[dict_i as usize].borrow_mut().insert(key, val);
 
-                let c = *buf_chars.peek().ok_or(Error::Eof)?;
+                let c = **buf_chars.peek().ok_or(Error::Eof)?;
 
                 if c == Token::End.into() {
                     buf_chars.next();
@@ -320,7 +324,7 @@ pub fn load(stream: &mut (impl Read + Seek)) -> Result<Value, Error> {
 
             // List value
             State::ListVal => {
-                let c = *buf_chars.peek().ok_or(Error::Eof)?;
+                let c = **buf_chars.peek().ok_or(Error::Eof)?;
 
                 match c.try_into() {
                     // End of list
@@ -381,7 +385,7 @@ pub fn load(stream: &mut (impl Read + Seek)) -> Result<Value, Error> {
 
             // Process current list value as str
             State::ListValStr => {
-                item_stack[list_i as usize] = Some(Value::Str(buf_str.clone()));
+                item_stack[list_i as usize] = Some(str_or_bytes(buf_str.clone()));
                 buf_str.clear();
                 state = State::ListFlush;
             }
@@ -389,7 +393,7 @@ pub fn load(stream: &mut (impl Read + Seek)) -> Result<Value, Error> {
             // Process current list value as int
             State::ListValInt => {
                 // Unwrap here because Int state already checks for EOF
-                let c = buf_chars.next().unwrap();
+                let c = *buf_chars.next().unwrap();
 
                 if c != Token::End.into() {
                     return Err(Error::Syntax(real_index as usize, "Expected 'e' token".into()));
@@ -431,7 +435,7 @@ pub fn load(stream: &mut (impl Read + Seek)) -> Result<Value, Error> {
                 let val = item_stack[list_i as usize].clone().unwrap().unref();
                 list_stack[list_i as usize].borrow_mut().push(val);
 
-                let c = *buf_chars.peek().unwrap();
+                let c = **buf_chars.peek().unwrap();
 
                 if c == Token::End.into() {
                     buf_chars.next();
@@ -450,7 +454,7 @@ pub fn load(stream: &mut (impl Read + Seek)) -> Result<Value, Error> {
                     state = State::Int;
                     next_state.push(State::Str);
                 } else {
-                    let c = buf_chars.next().ok_or(Error::Eof)?;
+                    let c = *buf_chars.next().ok_or(Error::Eof)?;
                     #[cfg(test)] eprintln!("c = {}", c);
 
                     if c != Token::Colon.into() {
@@ -495,7 +499,7 @@ pub fn load(stream: &mut (impl Read + Seek)) -> Result<Value, Error> {
             State::Int => {
                 const CHARS: &[char] = &['0', '1', '2', '3', '4', '5', '6', '7', '8', '9', '-'];
 
-                let c = *buf_chars.peek().ok_or(Error::Eof)?;
+                let c = **buf_chars.peek().ok_or(Error::Eof)? as char;
                 #[cfg(test)] eprintln!("(int) c = {}", c);
 
                 if CHARS.contains(&c) {
@@ -531,7 +535,7 @@ pub fn load(stream: &mut (impl Read + Seek)) -> Result<Value, Error> {
     match state {
         State::RootValInt => {
             // Unwrap here because Int state already checks for EOF
-            let c = buf_chars.next().unwrap();
+            let c = *buf_chars.next().unwrap();
 
             if c != Token::End.into() {
                 return Err(Error::Syntax(file_size as usize - 1, "Expected 'e' token".into()));
@@ -543,7 +547,7 @@ pub fn load(stream: &mut (impl Read + Seek)) -> Result<Value, Error> {
             root = Some(Value::Int(val));
         }
 
-        State::RootValStr => root = Some(Value::Str(buf_str)),
+        State::RootValStr => root = Some(str_or_bytes(buf_str)),
 
         State::RootValDict => {
             let dict = dict_stack.pop().ok_or(Error::StackUnderflow)?.borrow().clone();
@@ -566,6 +570,35 @@ pub fn load(stream: &mut (impl Read + Seek)) -> Result<Value, Error> {
 pub fn load_str(s: &str) -> Result<Value, Error> {
     let mut cursor = Cursor::new(s);
     load(&mut cursor)
+}
+
+/// Try to convert a raw buffer to utf8 and return the appropriate Value
+fn str_or_bytes(vec: Vec<u8>) -> Value {
+    match String::from_utf8(vec) {
+        Ok(s) => Value::Str(s),
+        Err(e) => Value::Bytes(e.into_bytes()),
+    }
+}
+
+fn repr_bytes(bytes: &[u8], truncate_at: usize) -> String {
+    let mut buf = String::from("b\"");
+
+    for b in bytes.iter().take(truncate_at) {
+        if (32..128).contains(b) {
+            buf.push(*b as char);
+        } else {
+            buf.extend(format!("\\x{:02X}", b).chars());
+        }
+    }
+
+    buf.push('"');
+
+    if bytes.len() > truncate_at {
+        buf.push_str("... (");
+        buf.extend(format!("{} bytes)", bytes.len()).chars());
+    }
+
+    buf
 }
 
 impl Value {
@@ -591,6 +624,11 @@ impl Value {
     /// Is the current value a str?
     pub fn is_str(&self) -> bool {
         matches!(self, Value::Str(_))
+    }
+
+    /// Is the current value a bytes?
+    pub fn is_bytes(&self) -> bool {
+        matches!(self, Value::Bytes(_))
     }
 
     /// Is the current value a dict?
@@ -619,7 +657,15 @@ impl Value {
         }
     }
 
-    pub fn to_map(&self) -> Option<&BTreeMap<String, Value>> {
+    pub fn to_bytes(&self) -> Option<&[u8]> {
+        if let Value::Bytes(v) = self {
+            Some(v.as_slice())
+        } else {
+            None
+        }
+    }
+
+    pub fn to_map(&self) -> Option<&BTreeMap<Value, Value>> {
         if let Value::Dict(map) = self {
             Some(map)
         } else {
@@ -642,6 +688,8 @@ impl<'a> ValueDisplay<'a> {
     }
 
     pub fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        const RUN_LIMIT: usize = 3000;
+
         let mut runs = 0;
         let mut indent = 0;
         let mut state = DisplayState::Root;
@@ -652,10 +700,6 @@ impl<'a> ValueDisplay<'a> {
 
 
         while state != DisplayState::Done {
-            if runs > 100 {
-                break;
-            }
-
             match state {
                 DisplayState::Root => {
                     if let Some(i) = root.to_i64() {
@@ -663,6 +707,9 @@ impl<'a> ValueDisplay<'a> {
                         state = DisplayState::Done;
                     } else if let Some(s) = root.to_str() {
                         write!(f, "{:?}", s)?;
+                        state = DisplayState::Done;
+                    } else if let Some(b) = root.to_bytes() {
+                        write!(f, "{}", repr_bytes(b, 32))?;
                         state = DisplayState::Done;
                     } else if let Some(m) = root.to_map() {
                         write!(f, "{{\n")?;
@@ -687,13 +734,16 @@ impl<'a> ValueDisplay<'a> {
 
                     if let Some((key, val)) = next {
                         write!(f, "{:indent$}", "", indent = indent * indent_size)?;
-                        write!(f, "\"{}\": ", key)?;
+                        write!(f, "{}: ", key)?;
 
                         if let Some(i) = val.to_i64() {
                             write!(f, "{}", i)?;
                             write!(f, ",\n")?;
                         } else if let Some(s) = val.to_str() {
                             write!(f, "{:?}", s)?;
+                            write!(f, ",\n")?;
+                        } else if let Some(b) = val.to_bytes() {
+                            write!(f, "{}", repr_bytes(b, 8))?;
                             write!(f, ",\n")?;
                         } else if let Some(m) = val.to_map() {
                             write!(f, "{{\n")?;
@@ -730,8 +780,13 @@ impl<'a> ValueDisplay<'a> {
                     if let Some(val) = next {
                         if let Some(i) = val.to_i64() {
                             write!(f, "{}", i)?;
+                            if !is_last { write!(f, ", ")? };
                         } else if let Some(s) = val.to_str() {
                             write!(f, "{:?}", s)?;
+                            if !is_last { write!(f, ", ")? };
+                        } else if let Some(b) = val.to_bytes() {
+                            write!(f, "{}", repr_bytes(b, 8))?;
+                            if !is_last { write!(f, ", ")? };
                         } else if let Some(m) = val.to_map() {
                             write!(f, "{{\n")?;
                             dict_stack.push(m.iter().peekable());
@@ -745,10 +800,6 @@ impl<'a> ValueDisplay<'a> {
                         } else {
                             return Err(fmt::Error);
                         }
-
-                        if !is_last {
-                            write!(f, ", ")?;
-                        }
                     } else {
                         write!(f, "]")?;
                         let _ = list_stack.pop().ok_or(fmt::Error)?;
@@ -756,6 +807,12 @@ impl<'a> ValueDisplay<'a> {
 
                         if state == DisplayState::Dict {
                             write!(f, ",\n")?;
+                        } else if state == DisplayState::List {
+                            let count = list_stack.last().unwrap().clone().count();
+
+                            if count > 0 {
+                                write!(f, ", ")?;
+                            }
                         }
                     }
                 }
@@ -765,9 +822,13 @@ impl<'a> ValueDisplay<'a> {
             }
 
             runs += 1;
+
+            if runs == RUN_LIMIT {
+                write!(f, "\n<truncating as output would be too big...>")?;
+                break;
+            }
         }
 
-        write!(f, "\nFinished display with {} runs", runs)?;
         Ok(())
     }
 }
@@ -798,28 +859,34 @@ impl From<IoError> for Error {
     }
 }
 
-impl Into<char> for Token {
-    fn into(self) -> char {
+impl Into<u8> for Token {
+    fn into(self) -> u8 {
         match self {
-            Self::Dict => 'd',
-            Self::Int => 'i',
-            Self::List => 'l',
-            Self::Colon => ':',
-            Self::End => 'e',
+            Self::Dict => 'd' as u8,
+            Self::Int => 'i' as u8,
+            Self::List => 'l' as u8,
+            Self::Colon => ':' as u8,
+            Self::End => 'e' as u8,
         }
     }
 }
 
-impl TryFrom<char> for Token {
+impl TryFrom<u8> for Token {
     type Error = ();
 
-    fn try_from(c: char) ->  Result<Token, Self::Error> {
+    fn try_from(c: u8) ->  Result<Token, Self::Error> {
+        const D: u8 = 'd' as u8;
+        const I: u8 = 'i' as u8;
+        const L: u8 = 'l' as u8;
+        const C: u8 = ':' as u8;
+        const E: u8 = 'e' as u8;
+
         match c {
-            'd' => Ok(Token::Dict),
-            'i' => Ok(Token::Int),
-            'l' => Ok(Token::List),
-            ':' => Ok(Token::Colon),
-            'e' => Ok(Token::End),
+            D => Ok(Token::Dict),
+            I => Ok(Token::Int),
+            L => Ok(Token::List),
+            C => Ok(Token::Colon),
+            E => Ok(Token::End),
             _ => Err(()),
         }
     }
@@ -856,9 +923,9 @@ mod tests {
     #[test]
     fn load_dict_val_int() {
         let mut map = BTreeMap::new();
-        map.insert("foo".into(), Value::Int(0));
-        map.insert("bar".into(), Value::Int(1));
-        map.insert("baz".into(), Value::Int(2));
+        map.insert(Value::Str("foo".into()), Value::Int(0));
+        map.insert(Value::Str("bar".into()), Value::Int(1));
+        map.insert(Value::Str("baz".into()), Value::Int(2));
 
         check_value(DICT_VAL_INT, Value::Dict(map));
     }
@@ -901,21 +968,21 @@ mod tests {
         let mut buz_map = BTreeMap::new();
         let mut fghij_map = BTreeMap::new();
 
-        fghij_map.insert("wxyz".into(), Value::Int(0));
+        fghij_map.insert(Value::Str("wxyz".into()), Value::Int(0));
 
         let fghij_list = Value::List(vec![
             Value::Str("klmnop".into()), Value::Str("qrstuv".into()), Value::Dict(fghij_map),
         ]);
         let zyx_list = Value::List(vec![Value::Int(0), Value::Int(1), Value::Int(2)]);
 
-        buz_map.insert("abcde".into(), Value::Str("fghij".into()));
-        buz_map.insert("boz".into(), Value::Str("bez".into()));
-        buz_map.insert("fghij".into(), fghij_list);
-        root_map.insert("foo".into(), Value::Int(0));
-        root_map.insert("bar".into(), Value::Int(1));
-        root_map.insert("baz".into(), Value::Int(2));
-        root_map.insert("buz".into(), Value::Dict(buz_map));
-        root_map.insert("zyx".into(), zyx_list);
+        buz_map.insert(Value::Str("abcde".into()), Value::Str("fghij".into()));
+        buz_map.insert(Value::Str("boz".into()), Value::Str("bez".into()));
+        buz_map.insert(Value::Str("fghij".into()), fghij_list);
+        root_map.insert(Value::Str("foo".into()), Value::Int(0));
+        root_map.insert(Value::Str("bar".into()), Value::Int(1));
+        root_map.insert(Value::Str("baz".into()), Value::Int(2));
+        root_map.insert(Value::Str("buz".into()), Value::Dict(buz_map));
+        root_map.insert(Value::Str("zyx".into()), zyx_list);
 
         check_value(DICT_MIXED, Value::Dict(root_map));
     }
