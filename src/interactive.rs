@@ -12,6 +12,7 @@ pub enum Error {
 
 enum CmdError {
     UnknownCommand(String),
+    Command(String),
     ArgUnknownEscape(usize, char),
     ArgTrailingEscape,
     ArgEOL,
@@ -79,7 +80,8 @@ fn interactive_cmd(state: &mut State, cmd: String, argbuf: &str) -> Result<bool,
             let data = state.data.as_ref().unwrap();
 
             if let Some(arg) = args.iter().next() {
-                println!("TODO");
+                let value = data.select(arg)?;
+                println!("{}", value);
             } else {
                 println!("{}", data);
             }
@@ -182,10 +184,17 @@ impl From<IoError> for Error {
     }
 }
 
+impl From<crate::benc::SelectError> for CmdError {
+    fn from(e: crate::benc::SelectError) -> Self {
+        Self::Command(format!("{}", e))
+    }
+}
+
 impl fmt::Display for CmdError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
             Self::UnknownCommand(name) => write!(f, "Unknown command '{}'", name),
+            Self::Command(msg) => write!(f, "Command failed with: {}", msg),
             Self::ArgUnknownEscape(pos, c) => write!(f, "Unknown escape character '{}' at {}", c, pos + 1),
             Self::ArgTrailingEscape => write!(f, "Trailing escape character"),
             Self::ArgEOL => write!(f, "Reached end of line trying to match quote"),

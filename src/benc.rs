@@ -46,7 +46,7 @@ enum State {
 }
 
 #[derive(Debug, PartialEq)]
-enum DisplayState {
+enum TraverseState {
     Root,
     Dict,
     List,
@@ -62,6 +62,17 @@ pub enum Error {
     StackUnderflow,
     UnexpectedState,
     BigInt,
+}
+
+#[derive(Debug)]
+pub enum SelectError {
+    Key(String, String),
+    Index(String, usize),
+    Subscriptable(String),
+    Indexable(String),
+    Primitive(String),
+    Syntax(String, usize, String),
+    End,
 }
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -680,6 +691,259 @@ impl Value {
             None
         }
     }
+
+    pub fn value_type(value: &Self) -> &'static str {
+        match value {
+            Self::Int(_) => "int",
+            Self::Str(_) => "str",
+            Self::Bytes(_) => "bytes",
+            Self::Dict(_) => "dict",
+            Self::List(_) => "list",
+            Self::DictRef(_) => "&dict",
+            Self::ListRef(_) => "&list",
+        }
+    }
+
+    /// Select a value inside this one if it is a container (dict or list).
+    ///
+    /// # Syntax
+    ///
+    /// - Selecting with key: `.keyname`. `keyname` can be be anything and also can contain spaces, but
+    /// if it has dots or an open bracket (`[`), put a `\\` before them.
+    /// - Selecting with an index: `[n]`, where N is in `[0; n)`.
+    ///
+    /// An empty selector will return this Value.
+    ///
+    /// ## Examples
+    ///
+    /// - `.bar`: Selects key `bar` in the root.
+    /// - `.buz.fghij[1]`: Selects key `buz` (a dict) in the root, then key `fghij` (a list),
+    /// then index number 1.
+    ///
+    /// # Errors
+    ///
+    /// - `SelectError::Primitive(context)`: This Value is not a container.
+    /// - `SelectError::Indexable(context)`: The current Value is not indexable (is a dict).
+    /// - `SelectError::Subscriptable(context)`: The current Value is not subscriptable (is a list).
+    /// - `SelectError::Key(context, key)`: The current dict does not have key `key`.
+    /// - `SelectError::Index(context, number)`: `number` is out of bounds for the current list.
+    /// - `SelectError::Syntax(where, why)`: There was an error parsing the selector string.
+    /// - `SelectError::End`: Reached end of selector while trying to parse a key or index
+    ///
+    /// `context` will contain the selector up until where the error occurred.
+    pub fn select(&self, mut selector: &str) -> Result<&Value, SelectError> {
+        if !self.is_dict() && !self.is_list() && !self.is_ref() {
+            return Err(SelectError::Primitive("<root>".into()));
+        }
+
+        if selector.is_empty() {
+            return Ok(self);
+        }
+
+        let full_selector = &selector[..];
+        let mut state = TraverseState::Root;
+        let mut current_dict = None;
+        let mut current_list = None;
+        let mut value = self;
+
+        macro_rules! context {
+            () => {{
+                let c = &full_selector[..context!(pos)];
+
+                if !c.is_empty() {
+                    c.into()
+                } else {
+                    "<root>".into()
+                }
+            }};
+
+            (pos) => {
+                full_selector.len() - selector.len() + 1;
+            };
+        }
+
+        while state != TraverseState::Done {
+            match state {
+                TraverseState::Root => {
+                    if let Some(m) = value.to_map() {
+                        state = TraverseState::Dict;
+                        current_dict = Some(m.iter());
+                    } else if let Some(v) = value.to_vec() {
+                        state = TraverseState::List;
+                        current_list = Some(v.iter());
+                    }
+                }
+
+                TraverseState::Dict => {
+                    if selector.chars().next().unwrap() == '[' {
+                        return Err(SelectError::Indexable(context!()));
+                    }
+
+                    let (rest, key) = Self::parse_key_selector(selector, full_selector)?;
+                    let val = current_dict.take().unwrap().find_map(|(k, v)| {
+                        k.to_str().and_then(|k| if k == key {
+                            Some(v)
+                        } else {
+                            None
+                        })
+                    });
+                    selector = rest;
+
+                    if let Some(val) = val {
+                        if selector.is_empty() {
+                            value = val;
+                            state = TraverseState::Done;
+                        } else if let Some(m) = val.to_map() {
+                            current_dict = Some(m.iter());
+                        } else if let Some(v) = val.to_vec() {
+                            current_list = Some(v.iter());
+                            state = TraverseState::List;
+                        } else {
+                            return Err(SelectError::Primitive(context!()));
+                        }
+                    } else {
+                        return Err(SelectError::Key(context!(), key.into()));
+                    }
+                }
+
+                TraverseState::List => {
+                    if selector.chars().next().unwrap()  == '.' {
+                        return Err(SelectError::Subscriptable(context!()));
+                    }
+
+                    let (rest, index) = Self::parse_index_selector(selector, full_selector)?;
+                    selector = rest;
+
+                    if let Some(val) = current_list.take().unwrap().nth(index) {
+                        if selector.is_empty() {
+                            value = val;
+                            state = TraverseState::Done;
+                        } else if let Some(m) = val.to_map() {
+                            current_dict = Some(m.iter());
+                            state = TraverseState::Dict;
+                        } else if let Some(v) = val.to_vec() {
+                            current_list = Some(v.iter());
+                        } else {
+                            return Err(SelectError::Primitive(context!()));
+                        }
+                    } else {
+                        return Err(SelectError::Index(context!(), index));
+                    }
+                }
+
+                // Done
+                _ => unreachable!(),
+            }
+        }
+
+        Ok(value)
+    }
+
+    fn parse_key_selector<'a>(input: &'a str, full_input: &str) -> Result<(&'a str, String), SelectError> {
+        const END_CHARS: &[char] = &['.', '['];
+
+        let mut buf = String::new();
+        let mut escaped = false;
+        let pos = || full_input.len() - input.len() + 1;
+        let context = || {
+            let c = &full_input[..pos()];
+
+            if !c.is_empty() {
+                c.into()
+            } else {
+                "<root>".into()
+            }
+        };
+        let mut chars = input.chars();
+
+        if chars.next().unwrap() != '.' {
+            return Err(SelectError::Syntax(context(), pos(), "Expected dot".into()));
+        }
+
+        let mut input = &input[1..];
+
+        for (i, c) in chars.enumerate() {
+            #[cfg(test)] eprintln!("i,c: {}, {}", i, c);
+
+            if END_CHARS.contains(&c) {
+                if escaped {
+                    buf.push(c);
+                    input = &input[(i + 1)..];
+                    escaped = false;
+                } else {
+                    buf.push_str(&input[..i]);
+                    input = &input[i..];
+                    #[cfg(test)] eprintln!("last_input: {}", input);
+                    break;
+                }
+            } else if c == '\\' {
+                if escaped {
+                    buf.push(c);
+                    input = &input[(i + 1)..];
+                    escaped = false;
+                } else {
+                    buf.push_str(&input[..i]);
+                    input = &input[(i + 1)..];
+                    escaped = true;
+                }
+            } else if escaped {
+                return Err(SelectError::Syntax(context(), pos(), format!("Cannot escape '{}'", c)));
+            }
+        }
+
+        if escaped {
+            return Err(SelectError::Syntax(context(), pos(), "Trailing escape".into()));
+        }
+
+        if buf.is_empty() && !input.is_empty() {
+            buf.push_str(input);
+            input = &input[input.len()..];
+        }
+
+        Ok((input, buf))
+    }
+
+    fn parse_index_selector<'a>(input: &'a str, full_input: &str) -> Result<(&'a str, usize), SelectError> {
+        let pos = || full_input.len() - input.len() + 1;
+        let context = || {
+            let c = &full_input[..pos()];
+
+            if !c.is_empty() {
+                c.into()
+            } else {
+                "<root>".into()
+            }
+        };
+
+        let mut chars = input.chars();
+        let mut index = None;
+        let first_char = chars.next().unwrap();
+
+        if first_char != '[' {
+            return Err(SelectError::Syntax(context(), pos(), "Expected '['".into()));
+        }
+
+        let mut input = &input[1..];
+
+        for (i, c) in chars.enumerate() {
+            if c == ']' {
+                let index_ = input[..i].parse::<usize>().map_err(|_| {
+                    SelectError::Syntax(context(), pos(), "Not a number".into())
+                })?;
+                input = &input[(i + 1)..];
+                index = Some(index_);
+                break;
+            } else if c == '-' {
+                return Err(SelectError::Syntax(context(), pos(), "Unexpected '-'".into()));
+            }
+        }
+
+        if index.is_none() {
+            return Err(SelectError::End);
+        }
+
+        Ok((input, index.unwrap()))
+    }
 }
 
 impl<'a> ValueDisplay<'a> {
@@ -692,43 +956,43 @@ impl<'a> ValueDisplay<'a> {
 
         let mut runs = 0;
         let mut indent = 0;
-        let mut state = DisplayState::Root;
+        let mut state = TraverseState::Root;
         let mut next_state = Vec::new();
         let mut dict_stack = Vec::new();
         let mut list_stack = Vec::new();
         let ValueDisplay(root, indent_size) = self;
 
 
-        while state != DisplayState::Done {
+        while state != TraverseState::Done {
             match state {
-                DisplayState::Root => {
+                TraverseState::Root => {
                     if let Some(i) = root.to_i64() {
                         write!(f, "{}", i)?;
-                        state = DisplayState::Done;
+                        state = TraverseState::Done;
                     } else if let Some(s) = root.to_str() {
                         write!(f, "{:?}", s)?;
-                        state = DisplayState::Done;
+                        state = TraverseState::Done;
                     } else if let Some(b) = root.to_bytes() {
                         write!(f, "{}", repr_bytes(b, 32))?;
-                        state = DisplayState::Done;
+                        state = TraverseState::Done;
                     } else if let Some(m) = root.to_map() {
                         write!(f, "{{\n")?;
                         dict_stack.push(m.iter().peekable());
                         write!(f, "{:indent$}", "", indent = indent * indent_size)?;
                         indent += 1;
-                        state = DisplayState::Dict;
-                        next_state.push(DisplayState::Done);
+                        state = TraverseState::Dict;
+                        next_state.push(TraverseState::Done);
                     } else if let Some(v) = root.to_vec() {
                         write!(f, "[")?;
                         list_stack.push(v.iter().peekable());
-                        state = DisplayState::List;
-                        next_state.push(DisplayState::Done);
+                        state = TraverseState::List;
+                        next_state.push(TraverseState::Done);
                     } else {
                         return Err(fmt::Error);
                     }
                 }
 
-                DisplayState::Dict => {
+                TraverseState::Dict => {
                     let it = dict_stack.last_mut().unwrap();
                     let next = it.next();
 
@@ -749,12 +1013,12 @@ impl<'a> ValueDisplay<'a> {
                             write!(f, "{{\n")?;
                             dict_stack.push(m.iter().peekable());
                             indent += 1;
-                            next_state.push(DisplayState::Dict);
+                            next_state.push(TraverseState::Dict);
                         } else if let Some(v) = val.to_vec() {
                             write!(f, "[")?;
                             list_stack.push(v.iter().peekable());
-                            state = DisplayState::List;
-                            next_state.push(DisplayState::Dict);
+                            state = TraverseState::List;
+                            next_state.push(TraverseState::Dict);
                         } else {
                             return Err(fmt::Error);
                         }
@@ -766,13 +1030,13 @@ impl<'a> ValueDisplay<'a> {
                         let _ = dict_stack.pop().ok_or(fmt::Error)?;
                         state = next_state.pop().ok_or(fmt::Error)?;
 
-                        if state == DisplayState::Dict {
+                        if state == TraverseState::Dict {
                             write!(f, ",\n")?;
                         }
                     }
                 }
 
-                DisplayState::List => {
+                TraverseState::List => {
                     let it = list_stack.last_mut().unwrap();
                     let next = it.next();
                     let is_last = it.peek().is_none();
@@ -791,12 +1055,12 @@ impl<'a> ValueDisplay<'a> {
                             write!(f, "{{\n")?;
                             dict_stack.push(m.iter().peekable());
                             indent += 1;
-                            state = DisplayState::Dict;
-                            next_state.push(DisplayState::List);
+                            state = TraverseState::Dict;
+                            next_state.push(TraverseState::List);
                         } else if let Some(v) = val.to_vec() {
                             write!(f, "[")?;
                             list_stack.push(v.iter().peekable());
-                            next_state.push(DisplayState::List);
+                            next_state.push(TraverseState::List);
                         } else {
                             return Err(fmt::Error);
                         }
@@ -805,9 +1069,9 @@ impl<'a> ValueDisplay<'a> {
                         let _ = list_stack.pop().ok_or(fmt::Error)?;
                         state = next_state.pop().ok_or(fmt::Error)?;
 
-                        if state == DisplayState::Dict {
+                        if state == TraverseState::Dict {
                             write!(f, ",\n")?;
-                        } else if state == DisplayState::List {
+                        } else if state == TraverseState::List {
                             let count = list_stack.last().unwrap().clone().count();
 
                             if count > 0 {
@@ -849,6 +1113,20 @@ impl fmt::Display for Error {
             Error::StackUnderflow => write!(f, "Stack underflow"),
             Error::UnexpectedState => write!(f, "Unexpected state in main loop"),
             Error::BigInt => write!(f, "Integer too big"),
+        }
+    }
+}
+
+impl fmt::Display for SelectError {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            SelectError::Key(ctx, key) => write!(f, "[{:?}] Unknown key '{}'", ctx, key),
+            SelectError::Index(ctx, index) => write!(f, "[{:?}] Index {} out of bounds", ctx, index),
+            SelectError::Subscriptable(ctx) => write!(f, "[{:?}] Current value cannot be subscripted", ctx),
+            SelectError::Indexable(ctx) => write!(f, "[{:?}] Current value cannot be indexed", ctx),
+            SelectError::Primitive(ctx) => write!(f, "[{:?}] Current value is not selectable!", ctx),
+            SelectError::Syntax(ctx, pos, msg) => write!(f, "[{:?}] Syntax error at {}: {}", ctx, pos, msg),
+            SelectError::End => write!(f, "Reached end of selector prematurely"),
         }
     }
 }
@@ -985,5 +1263,75 @@ mod tests {
         root_map.insert(Value::Str("zyx".into()), zyx_list);
 
         check_value(DICT_MIXED, Value::Dict(root_map));
+    }
+
+    #[test]
+    fn select_dict_simple() {
+        let mut map = BTreeMap::new();
+        map.insert(Value::Str("foo".into()), Value::Int(0));
+        map.insert(Value::Str("bar".into()), Value::Int(1));
+        map.insert(Value::Str("baz".into()), Value::Int(2));
+        let dict = Value::Dict(map);
+
+        assert_eq!(dict.select(".foo").unwrap(), &Value::Int(0));
+        assert_eq!(dict.select(".bar").unwrap(), &Value::Int(1));
+        assert_eq!(dict.select(".baz").unwrap(), &Value::Int(2));
+    }
+
+    #[test]
+    fn select_list_nested() {
+        let list_1 = Value::List(vec![Value::Int(0), Value::Int(1), Value::Int(2)]);
+        let list_2 = Value::List(vec![Value::Int(3), Value::Int(4), Value::Int(5)]);
+        let list_3 = Value::List(vec![Value::Int(6), Value::Int(7), Value::Int(8)]);
+        let list = Value::List(vec![list_1.clone(), list_2.clone(), list_3.clone()]);
+
+        assert_eq!(list.select("[0]").unwrap(), &list_1);
+        assert_eq!(list.select("[1]").unwrap(), &list_2);
+        assert_eq!(list.select("[2]").unwrap(), &list_3);
+        assert_eq!(list.select("[0][0]").unwrap(), &Value::Int(0));
+        assert_eq!(list.select("[0][1]").unwrap(), &Value::Int(1));
+        assert_eq!(list.select("[0][2]").unwrap(), &Value::Int(2));
+        assert_eq!(list.select("[1][0]").unwrap(), &Value::Int(3));
+        assert_eq!(list.select("[1][1]").unwrap(), &Value::Int(4));
+        assert_eq!(list.select("[1][2]").unwrap(), &Value::Int(5));
+        assert_eq!(list.select("[2][0]").unwrap(), &Value::Int(6));
+        assert_eq!(list.select("[2][1]").unwrap(), &Value::Int(7));
+        assert_eq!(list.select("[2][2]").unwrap(), &Value::Int(8));
+    }
+
+    #[test]
+    fn select_dict_mixed() {
+        let mut root_map = BTreeMap::new();
+        let mut buz_map = BTreeMap::new();
+        let mut fghij_map = BTreeMap::new();
+
+        fghij_map.insert(Value::Str("wxyz".into()), Value::Int(0));
+
+        let fghij_list = Value::List(vec![
+            Value::Str("klmnop".into()), Value::Str("qrstuv".into()), Value::Dict(fghij_map.clone()),
+        ]);
+        let zyx_list = Value::List(vec![Value::Int(0), Value::Int(1), Value::Int(2)]);
+
+        buz_map.insert(Value::Str("abcde".into()), Value::Str("fghij".into()));
+        buz_map.insert(Value::Str("boz".into()), Value::Str("bez".into()));
+        buz_map.insert(Value::Str("fghij".into()), fghij_list.clone());
+        root_map.insert(Value::Str("foo".into()), Value::Int(0));
+        root_map.insert(Value::Str("bar".into()), Value::Int(1));
+        root_map.insert(Value::Str("baz".into()), Value::Int(2));
+        root_map.insert(Value::Str("buz".into()), Value::Dict(buz_map.clone()));
+        root_map.insert(Value::Str("zyx".into()), zyx_list);
+        let dict = Value::Dict(root_map);
+
+        assert_eq!(dict.select(".foo").unwrap(), &Value::Int(0));
+        assert_eq!(dict.select(".bar").unwrap(), &Value::Int(1));
+        assert_eq!(dict.select(".baz").unwrap(), &Value::Int(2));
+        assert_eq!(dict.select(".buz").unwrap(), &Value::Dict(buz_map));
+        assert_eq!(dict.select(".buz.abcde").unwrap(), &Value::Str("fghij".into()));
+        assert_eq!(dict.select(".buz.boz").unwrap(), &Value::Str("bez".into()));
+        assert_eq!(dict.select(".buz.fghij").unwrap(), &fghij_list);
+        assert_eq!(dict.select(".buz.fghij[0]").unwrap(), &Value::Str("klmnop".into()));
+        assert_eq!(dict.select(".buz.fghij[1]").unwrap(), &Value::Str("qrstuv".into()));
+        assert_eq!(dict.select(".buz.fghij[2]").unwrap(), &Value::Dict(fghij_map));
+        assert_eq!(dict.select(".buz.fghij[2].wxyz").unwrap(), &Value::Int(0));
     }
 }
