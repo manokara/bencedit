@@ -80,7 +80,7 @@ pub enum Value {
     Int(i64),
     Str(String),
     Bytes(Vec<u8>),
-    Dict(BTreeMap<Value, Value>),
+    Dict(BTreeMap<String, Value>),
     List(Vec<Value>),
 }
 
@@ -95,7 +95,7 @@ pub struct ValueDisplay<'a> {
 
 pub fn load(stream: &mut (impl Read + Seek)) -> Result<Value, Error> {
     enum LocalValue {
-        DictRef(Rc<RefCell<BTreeMap<Value, Value>>>),
+        DictRef(Rc<RefCell<BTreeMap<String, Value>>>),
         ListRef(Rc<RefCell<Vec<Value>>>),
         Owned(Value),
     }
@@ -221,7 +221,9 @@ pub fn load(stream: &mut (impl Read + Seek)) -> Result<Value, Error> {
                         state = State::Str;
                         next_state.push(State::DictKey);
                     } else {
-                        *key_stack.last_mut().unwrap() = Some(str_or_bytes(buf_str.clone()));
+                        let key = String::from_utf8(buf_str.clone())
+                            .map_err(|_| Error::Syntax(real_index as usize, "Dict key must be a utf8 string".into()))?;
+                        *key_stack.last_mut().unwrap() = Some(key);
                         buf_str.clear();
                         state = State::DictVal;
                     }
@@ -665,7 +667,7 @@ impl Value {
         }
     }
 
-    pub fn to_map(&self) -> Option<&BTreeMap<Value, Value>> {
+    pub fn to_map(&self) -> Option<&BTreeMap<String, Value>> {
         if let Value::Dict(map) = self {
             Some(map)
         } else {
@@ -773,12 +775,10 @@ impl Value {
                     }
 
                     let (rest, key) = Self::parse_key_selector(selector, full_selector)?;
-                    let val = current_dict.take().unwrap().find_map(|(k, v)| {
-                        k.to_str().and_then(|k| if k == key {
-                            Some(v)
-                        } else {
-                            None
-                        })
+                    let val = current_dict.take().unwrap().find_map(|(k, v)| if k.eq(&key) {
+                        Some(v)
+                    } else {
+                        None
                     });
                     selector = rest;
 
@@ -1027,7 +1027,7 @@ impl<'a> fmt::Display for ValueDisplay<'a> {
 
                     if let Some((key, val)) = next {
                         write!(f, "{:indent$}", "", indent = indent * indent_size)?;
-                        write!(f, "{}: ", key)?;
+                        write!(f, "\"{}\": ", key)?;
 
                         if let Some(i) = val.to_i64() {
                             write!(f, "{}", i)?;
@@ -1269,9 +1269,9 @@ mod tests {
     #[test]
     fn load_dict_val_int() {
         let mut map = BTreeMap::new();
-        map.insert(Value::Str("foo".into()), Value::Int(0));
-        map.insert(Value::Str("bar".into()), Value::Int(1));
-        map.insert(Value::Str("baz".into()), Value::Int(2));
+        map.insert("foo".into(), Value::Int(0));
+        map.insert("bar".into(), Value::Int(1));
+        map.insert("baz".into(), Value::Int(2));
 
         check_value(DICT_VAL_INT, Value::Dict(map));
     }
@@ -1314,21 +1314,21 @@ mod tests {
         let mut buz_map = BTreeMap::new();
         let mut fghij_map = BTreeMap::new();
 
-        fghij_map.insert(Value::Str("wxyz".into()), Value::Int(0));
+        fghij_map.insert("wxyz".into(), Value::Int(0));
 
         let fghij_list = Value::List(vec![
             Value::Str("klmnop".into()), Value::Str("qrstuv".into()), Value::Dict(fghij_map),
         ]);
         let zyx_list = Value::List(vec![Value::Int(0), Value::Int(1), Value::Int(2)]);
 
-        buz_map.insert(Value::Str("abcde".into()), Value::Str("fghij".into()));
-        buz_map.insert(Value::Str("boz".into()), Value::Str("bez".into()));
-        buz_map.insert(Value::Str("fghij".into()), fghij_list);
-        root_map.insert(Value::Str("foo".into()), Value::Int(0));
-        root_map.insert(Value::Str("bar".into()), Value::Int(1));
-        root_map.insert(Value::Str("baz".into()), Value::Int(2));
-        root_map.insert(Value::Str("buz".into()), Value::Dict(buz_map));
-        root_map.insert(Value::Str("zyx".into()), zyx_list);
+        buz_map.insert("abcde".into(), Value::Str("fghij".into()));
+        buz_map.insert("boz".into(), Value::Str("bez".into()));
+        buz_map.insert("fghij".into(), fghij_list);
+        root_map.insert("foo".into(), Value::Int(0));
+        root_map.insert("bar".into(), Value::Int(1));
+        root_map.insert("baz".into(), Value::Int(2));
+        root_map.insert("buz".into(), Value::Dict(buz_map));
+        root_map.insert("zyx".into(), zyx_list);
 
         check_value(DICT_MIXED, Value::Dict(root_map));
     }
@@ -1336,9 +1336,9 @@ mod tests {
     #[test]
     fn select_dict_simple() {
         let mut map = BTreeMap::new();
-        map.insert(Value::Str("foo".into()), Value::Int(0));
-        map.insert(Value::Str("bar".into()), Value::Int(1));
-        map.insert(Value::Str("baz".into()), Value::Int(2));
+        map.insert("foo".into(), Value::Int(0));
+        map.insert("bar".into(), Value::Int(1));
+        map.insert("baz".into(), Value::Int(2));
         let dict = Value::Dict(map);
 
         assert_eq!(dict.select(".foo").unwrap(), &Value::Int(0));
@@ -1373,21 +1373,21 @@ mod tests {
         let mut buz_map = BTreeMap::new();
         let mut fghij_map = BTreeMap::new();
 
-        fghij_map.insert(Value::Str("wxyz".into()), Value::Int(0));
+        fghij_map.insert("wxyz".into(), Value::Int(0));
 
         let fghij_list = Value::List(vec![
             Value::Str("klmnop".into()), Value::Str("qrstuv".into()), Value::Dict(fghij_map.clone()),
         ]);
         let zyx_list = Value::List(vec![Value::Int(0), Value::Int(1), Value::Int(2)]);
 
-        buz_map.insert(Value::Str("abcde".into()), Value::Str("fghij".into()));
-        buz_map.insert(Value::Str("boz".into()), Value::Str("bez".into()));
-        buz_map.insert(Value::Str("fghij".into()), fghij_list.clone());
-        root_map.insert(Value::Str("foo".into()), Value::Int(0));
-        root_map.insert(Value::Str("bar".into()), Value::Int(1));
-        root_map.insert(Value::Str("baz".into()), Value::Int(2));
-        root_map.insert(Value::Str("buz".into()), Value::Dict(buz_map.clone()));
-        root_map.insert(Value::Str("zyx".into()), zyx_list);
+        buz_map.insert("abcde".into(), Value::Str("fghij".into()));
+        buz_map.insert("boz".into(), Value::Str("bez".into()));
+        buz_map.insert("fghij".into(), fghij_list.clone());
+        root_map.insert("foo".into(), Value::Int(0));
+        root_map.insert("bar".into(), Value::Int(1));
+        root_map.insert("baz".into(), Value::Int(2));
+        root_map.insert("buz".into(), Value::Dict(buz_map.clone()));
+        root_map.insert("zyx".into(), zyx_list);
         let dict = Value::Dict(root_map);
 
         assert_eq!(dict.select(".foo").unwrap(), &Value::Int(0));
