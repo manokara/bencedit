@@ -82,13 +82,27 @@ pub enum Value {
     Bytes(Vec<u8>),
     Dict(BTreeMap<Value, Value>),
     List(Vec<Value>),
-    DictRef(Rc<RefCell<BTreeMap<Value, Value>>>),
-    ListRef(Rc<RefCell<Vec<Value>>>),
 }
 
 pub struct ValueDisplay<'a>(&'a Value, usize, usize, usize);
 
 pub fn load(stream: &mut (impl Read + Seek)) -> Result<Value, Error> {
+    enum LocalValue {
+        DictRef(Rc<RefCell<BTreeMap<Value, Value>>>),
+        ListRef(Rc<RefCell<Vec<Value>>>),
+        Owned(Value),
+    }
+
+    impl LocalValue {
+        fn to_owned(&self) -> Value {
+            match self {
+                Self::DictRef(r) => Value::Dict(r.borrow().clone()),
+                Self::ListRef(r) => Value::List(r.borrow().clone()),
+                Self::Owned(v) => v.clone(),
+            }
+        }
+    }
+
     let file_size = stream.seek(SeekFrom::End(0))?;
     stream.seek(SeekFrom::Start(0))?;
 
@@ -231,7 +245,7 @@ pub fn load(stream: &mut (impl Read + Seek)) -> Result<Value, Error> {
 
                         buf_chars.next();
                         buf_index += 1;
-                        val_stack[dict_i as usize] = Some(Value::DictRef(Rc::clone(&map)));
+                        val_stack[dict_i as usize] = Some(LocalValue::DictRef(Rc::clone(&map)));
                         dict_stack.push(map);
                         key_stack.push(None);
                         val_stack.push(None);
@@ -247,7 +261,7 @@ pub fn load(stream: &mut (impl Read + Seek)) -> Result<Value, Error> {
 
                         buf_chars.next();
                         buf_index += 1;
-                        val_stack[dict_i as usize] = Some(Value::ListRef(Rc::clone(&vec)));
+                        val_stack[dict_i as usize] = Some(LocalValue::ListRef(Rc::clone(&vec)));
                         list_stack.push(vec);
                         item_stack.push(None);
                         list_i += 1;
@@ -277,7 +291,7 @@ pub fn load(stream: &mut (impl Read + Seek)) -> Result<Value, Error> {
 
             // Process current dict value as str
             State::DictValStr => {
-                val_stack[dict_i as usize] = Some(str_or_bytes(buf_str.clone()));
+                val_stack[dict_i as usize] = Some(LocalValue::Owned(str_or_bytes(buf_str.clone())));
                 buf_str.clear();
                 state = State::DictFlush;
             }
@@ -292,7 +306,7 @@ pub fn load(stream: &mut (impl Read + Seek)) -> Result<Value, Error> {
                 }
 
                 let val = buf_int.parse::<i64>().map_err(|_| Error::Syntax(real_index as usize, "Invalid integer".into()))?;
-                val_stack[dict_i as usize] = Some(Value::Int(val));
+                val_stack[dict_i as usize] = Some(LocalValue::Owned(Value::Int(val)));
                 buf_int.clear();
                 buf_index += 1;
 
@@ -303,7 +317,7 @@ pub fn load(stream: &mut (impl Read + Seek)) -> Result<Value, Error> {
             State::DictValDict => {
                 let dict = dict_stack.pop().ok_or(Error::StackUnderflow)?;
 
-                val_stack[dict_i as usize] = Some(Value::DictRef(dict));
+                val_stack[dict_i as usize] = Some(LocalValue::DictRef(dict));
                 dict_i -= 1;
                 key_stack.pop().ok_or(Error::StackUnderflow)?;
                 val_stack.pop().ok_or(Error::StackUnderflow)?;
@@ -314,7 +328,7 @@ pub fn load(stream: &mut (impl Read + Seek)) -> Result<Value, Error> {
             State::DictValList => {
                 let list = list_stack.pop().ok_or(Error::StackUnderflow)?;
 
-                val_stack[dict_i as usize] = Some(Value::ListRef(list));
+                val_stack[dict_i as usize] = Some(LocalValue::ListRef(list));
                 list_i -= 1;
                 item_stack.pop().ok_or(Error::StackUnderflow)?;
                 state = State::DictFlush;
@@ -323,7 +337,7 @@ pub fn load(stream: &mut (impl Read + Seek)) -> Result<Value, Error> {
             // Insert current (key, value) pair into current dict
             State::DictFlush => {
                 let key = key_stack[dict_i as usize].clone().unwrap();
-                let val = val_stack[dict_i as usize].clone().unwrap().unref();
+                let val = val_stack[dict_i as usize].as_ref().unwrap().to_owned();
                 dict_stack[dict_i as usize].borrow_mut().insert(key, val);
 
                 let c = **buf_chars.peek().ok_or(Error::Eof)?;
@@ -353,7 +367,7 @@ pub fn load(stream: &mut (impl Read + Seek)) -> Result<Value, Error> {
                     Ok(Token::Dict) => {
                         let d = Rc::new(RefCell::new(BTreeMap::new()));
 
-                        item_stack[list_i as usize] = Some(Value::DictRef(Rc::clone(&d)));
+                        item_stack[list_i as usize] = Some(LocalValue::DictRef(Rc::clone(&d)));
                         buf_chars.next();
                         dict_stack.push(d);
                         key_stack.push(None);
@@ -369,7 +383,7 @@ pub fn load(stream: &mut (impl Read + Seek)) -> Result<Value, Error> {
                     Ok(Token::List) => {
                         let l = Rc::new(RefCell::new(Vec::new()));
 
-                        item_stack[list_i as usize] = Some(Value::ListRef(Rc::clone(&l)));
+                        item_stack[list_i as usize] = Some(LocalValue::ListRef(Rc::clone(&l)));
                         buf_chars.next();
                         list_stack.push(l);
                         item_stack.push(None);
@@ -400,7 +414,7 @@ pub fn load(stream: &mut (impl Read + Seek)) -> Result<Value, Error> {
 
             // Process current list value as str
             State::ListValStr => {
-                item_stack[list_i as usize] = Some(str_or_bytes(buf_str.clone()));
+                item_stack[list_i as usize] = Some(LocalValue::Owned(str_or_bytes(buf_str.clone())));
                 buf_str.clear();
                 state = State::ListFlush;
             }
@@ -416,7 +430,7 @@ pub fn load(stream: &mut (impl Read + Seek)) -> Result<Value, Error> {
 
                 let val = buf_int.parse::<i64>().map_err(|_| Error::Syntax(real_index as usize, "Invalid integer".into()))?;
 
-                item_stack[list_i as usize] = Some(Value::Int(val));
+                item_stack[list_i as usize] = Some(LocalValue::Owned(Value::Int(val)));
                 buf_int.clear();
                 buf_index += 1;
                 state = State::ListFlush;
@@ -426,7 +440,7 @@ pub fn load(stream: &mut (impl Read + Seek)) -> Result<Value, Error> {
             State::ListValDict => {
                 let dict = dict_stack.pop().ok_or(Error::StackUnderflow)?.borrow().clone();
 
-                item_stack[list_i as usize] = Some(Value::Dict(dict));
+                item_stack[list_i as usize] = Some(LocalValue::Owned(Value::Dict(dict)));
                 key_stack.pop();
                 val_stack.pop();
                 dict_i -= 1;
@@ -438,7 +452,7 @@ pub fn load(stream: &mut (impl Read + Seek)) -> Result<Value, Error> {
             State::ListValList => {
                 let list = list_stack.pop().ok_or(Error::StackUnderflow)?.borrow().clone();
 
-                item_stack[list_i as usize] = Some(Value::List(list));
+                item_stack[list_i as usize] = Some(LocalValue::Owned(Value::List(list)));
                 item_stack.pop();
                 list_i -= 1;
 
@@ -447,7 +461,7 @@ pub fn load(stream: &mut (impl Read + Seek)) -> Result<Value, Error> {
 
             // Add current list value to the current list
             State::ListFlush => {
-                let val = item_stack[list_i as usize].clone().unwrap().unref();
+                let val = item_stack[list_i as usize].as_ref().unwrap().to_owned();
                 list_stack[list_i as usize].borrow_mut().push(val);
 
                 let c = **buf_chars.peek().unwrap();
@@ -617,20 +631,6 @@ fn repr_bytes(bytes: &[u8], truncate_at: usize) -> String {
 }
 
 impl Value {
-    /// Transforms possible references (Dict/ListRef) into owned values
-    pub fn unref(self) -> Value {
-        match self {
-            Value::DictRef(rc) => Value::Dict(rc.borrow().clone()),
-            Value::ListRef(rc) => Value::List(rc.borrow().clone()),
-            a => a,
-        }
-    }
-
-    /// Is the current value a reference?
-    pub fn is_ref(&self) -> bool {
-        matches!(self, Value::DictRef(_) | Value::ListRef(_))
-    }
-
     /// Is the current value an int?
     pub fn is_int(&self) -> bool {
         matches!(self, Value::Int(_))
@@ -703,8 +703,6 @@ impl Value {
             Self::Bytes(_) => "bytes",
             Self::Dict(_) => "dict",
             Self::List(_) => "list",
-            Self::DictRef(_) => "&dict",
-            Self::ListRef(_) => "&list",
         }
     }
 
@@ -748,7 +746,7 @@ impl Value {
     ///
     /// `context` will contain the selector up until where the error occurred.
     pub fn select(&self, mut selector: &str) -> Result<&Value, SelectError> {
-        if !self.is_dict() && !self.is_list() && !self.is_ref() {
+        if !self.is_dict() && !self.is_list() {
             return Err(SelectError::Primitive("<root>".into()));
         }
 
