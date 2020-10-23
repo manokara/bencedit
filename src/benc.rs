@@ -117,8 +117,6 @@ pub fn load(stream: &mut (impl Read + Seek)) -> Result<Value, Error> {
         return Err(Error::Empty);
     }
 
-    #[cfg(test)] eprintln!("File size: {}", file_size);
-
     let mut file_index = 0u64;
     let mut buf_index = 0usize;
     let mut state = State::Root;
@@ -149,8 +147,6 @@ pub fn load(stream: &mut (impl Read + Seek)) -> Result<Value, Error> {
         match state {
             State::Root => {
                 let c = **buf_chars.peek().unwrap();
-                #[cfg(test)]
-                eprintln!("c = {}", c);
 
                 match c.try_into() {
                     // Dict value
@@ -472,7 +468,6 @@ pub fn load(stream: &mut (impl Read + Seek)) -> Result<Value, Error> {
                     next_state.push(State::Str);
                 } else {
                     let c = *buf_chars.next().ok_or(Error::Eof)?;
-                    #[cfg(test)] eprintln!("c = {}", c);
 
                     if c != Token::Colon.into() {
                         return Err(Error::Syntax(real_index as usize, "Expected ':'".into()));
@@ -517,7 +512,6 @@ pub fn load(stream: &mut (impl Read + Seek)) -> Result<Value, Error> {
                 const CHARS: &[char] = &['0', '1', '2', '3', '4', '5', '6', '7', '8', '9', '-'];
 
                 let c = **buf_chars.peek().ok_or(Error::Eof)? as char;
-                #[cfg(test)] eprintln!("(int) c = {}", c);
 
                 if CHARS.contains(&c) {
                     // Only allow minus at the beginning
@@ -856,8 +850,6 @@ impl Value {
         let mut input = &input[1..];
 
         for (i, c) in chars.enumerate() {
-            #[cfg(test)] eprintln!("i,c: {}, {}", i, c);
-
             if END_CHARS.contains(&c) {
                 if escaped {
                     buf.push(c);
@@ -866,7 +858,6 @@ impl Value {
                 } else {
                     buf.push_str(&input[..i]);
                     input = &input[i..];
-                    #[cfg(test)] eprintln!("last_input: {}", input);
                     break;
                 }
             } else if c == '\\' {
