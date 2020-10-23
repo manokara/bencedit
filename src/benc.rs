@@ -970,6 +970,8 @@ impl<'a> ValueDisplay<'a> {
 
 
         while state != TraverseState::Done {
+            eprintln!("{}, {}, {}", dict_stack.len(), list_stack.len(), stack_count);
+
             match state {
                 TraverseState::Root => {
                     if let Some(i) = root.to_i64() {
@@ -988,11 +990,13 @@ impl<'a> ValueDisplay<'a> {
                         indent += 1;
                         state = TraverseState::Dict;
                         next_state.push(TraverseState::Done);
+                        stack_count += 1;
                     } else if let Some(v) = root.to_vec() {
                         write!(f, "[")?;
                         list_stack.push(v.iter().peekable());
                         state = TraverseState::List;
                         next_state.push(TraverseState::Done);
+                        stack_count += 1;
                     } else {
                         return Err(fmt::Error);
                     }
@@ -1049,6 +1053,7 @@ impl<'a> ValueDisplay<'a> {
                         write!(f, "}}")?;
                         let _ = dict_stack.pop().ok_or(fmt::Error)?;
                         state = next_state.pop().ok_or(fmt::Error)?;
+                        stack_count -= 1;
 
                         if state == TraverseState::Dict {
                             write!(f, ",\n")?;
@@ -1102,6 +1107,7 @@ impl<'a> ValueDisplay<'a> {
                         write!(f, "]")?;
                         let _ = list_stack.pop().ok_or(fmt::Error)?;
                         state = next_state.pop().ok_or(fmt::Error)?;
+                        stack_count -= 1;
 
                         if state == TraverseState::Dict {
                             write!(f, ",\n")?;
