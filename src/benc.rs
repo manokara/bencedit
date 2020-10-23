@@ -84,7 +84,14 @@ pub enum Value {
     List(Vec<Value>),
 }
 
-pub struct ValueDisplay<'a>(&'a Value, usize, usize, usize);
+pub struct ValueDisplay<'a> {
+    root: &'a Value,
+    max_depth: usize,
+    max_list_items: usize,
+    max_root_bytes: usize,
+    max_bytes: usize,
+    indent_size: usize,
+}
 
 pub fn load(stream: &mut (impl Read + Seek)) -> Result<Value, Error> {
     enum LocalValue {
@@ -705,16 +712,10 @@ impl Value {
         }
     }
 
-    /// Returns the internal display struct with the parameters given.
-    ///
-    /// # Arguments
-    ///
-    /// - `max_depth`: How deep down containers the display will show. Once `max_depth` is reached, the
-    /// container's contents will just be shown as '...'.
-    /// - `max_list_items`: The display will show up to `max_list_items` elements of lists, adding a '...' at the end.
-    /// - `indent_size`: How many spaces is an indentation
-    pub fn display<'a>(&'a self, max_depth: usize, max_list_items: usize, indent_size: usize) -> ValueDisplay<'a> {
-        ValueDisplay::new(self, max_depth, max_list_items, indent_size)
+    /// Returns the internal display struct that can be configured with a builder pattern.
+    /// See [`ValueDisplay`](struct.ValueDisplay.html).
+    pub fn display<'a>(&'a self) -> ValueDisplay<'a> {
+        ValueDisplay::new(self)
     }
 
     /// Select a value inside this one if it is a container (dict or list).
@@ -960,8 +961,40 @@ impl Value {
 }
 
 impl<'a> ValueDisplay<'a> {
-    pub fn new(root: &'a Value, max_depth: usize, max_list_items: usize, indent_size: usize) -> Self {
-        Self(root, max_depth, max_list_items, indent_size)
+    pub fn new(root: &'a Value) -> Self {
+        Self {
+            root,
+            max_depth: 5,
+            max_list_items: 10,
+            max_root_bytes: 32,
+            max_bytes: 10,
+            indent_size: 2,
+        }
+    }
+
+    pub fn max_depth(mut self, depth: usize) -> Self {
+        self.max_depth = depth;
+        self
+    }
+
+    pub fn max_list_items(mut self, max: usize) -> Self {
+        self.max_list_items = max;
+        self
+    }
+
+    pub fn max_root_bytes(mut self, max: usize) -> Self {
+        self.max_root_bytes = max;
+        self
+    }
+
+    pub fn max_bytes(mut self, max: usize) -> Self {
+        self.max_bytes = max;
+        self
+    }
+
+    pub fn indent_size(mut self, size: usize) -> Self {
+        self.indent_size = size;
+        self
     }
 }
 
@@ -973,7 +1006,9 @@ impl<'a> fmt::Display for ValueDisplay<'a> {
         let mut dict_stack = Vec::new();
         let mut list_stack = Vec::new();
         let mut stack_count = 0;
-        let ValueDisplay(root, max_depth, max_list_items, indent_size) = self;
+        let ValueDisplay{
+            root, max_depth, max_list_items, max_root_bytes, max_bytes, indent_size
+        } = self;
 
 
         while state != TraverseState::Done {
@@ -986,7 +1021,7 @@ impl<'a> fmt::Display for ValueDisplay<'a> {
                         write!(f, "{:?}", s)?;
                         state = TraverseState::Done;
                     } else if let Some(b) = root.to_bytes() {
-                        write!(f, "{}", repr_bytes(b, 32))?;
+                        write!(f, "{}", repr_bytes(b, *max_root_bytes))?;
                         state = TraverseState::Done;
                     } else if let Some(m) = root.to_map() {
                         write!(f, "{{\n")?;
@@ -1022,7 +1057,7 @@ impl<'a> fmt::Display for ValueDisplay<'a> {
                             write!(f, "{:?}", s)?;
                             write!(f, ",\n")?;
                         } else if let Some(b) = val.to_bytes() {
-                            write!(f, "{}", repr_bytes(b, 8))?;
+                            write!(f, "{}", repr_bytes(b, *max_bytes))?;
                             write!(f, ",\n")?;
                         } else if let Some(m) = val.to_map() {
                             if m.is_empty() {
@@ -1095,7 +1130,7 @@ impl<'a> fmt::Display for ValueDisplay<'a> {
                             write!(f, "{:?}", s)?;
                             if !is_last { write!(f, ", ")? };
                         } else if let Some(b) = val.to_bytes() {
-                            write!(f, "{}", repr_bytes(b, 8))?;
+                            write!(f, "{}", repr_bytes(b, *max_bytes))?;
                             if !is_last { write!(f, ", ")? };
                         } else if let Some(m) = val.to_map() {
                             if m.is_empty() {
@@ -1153,7 +1188,7 @@ impl<'a> fmt::Display for ValueDisplay<'a> {
 
 impl fmt::Display for Value {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        ValueDisplay::new(self, 5, 10, 2).fmt(f)
+        ValueDisplay::new(self).fmt(f)
     }
 }
 
