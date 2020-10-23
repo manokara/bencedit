@@ -971,8 +971,6 @@ impl<'a> ValueDisplay<'a> {
 
 
         while state != TraverseState::Done {
-            eprintln!("{}, {}, {}", dict_stack.len(), list_stack.len(), stack_count);
-
             match state {
                 TraverseState::Root => {
                     if let Some(i) = root.to_i64() {

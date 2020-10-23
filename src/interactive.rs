@@ -89,6 +89,16 @@ fn interactive_cmd(state: &mut State, cmd: String, argbuf: &str) -> Result<bool,
             true
         }
 
+        "reload" => {
+            if args.len() != 0 {
+                return Err(CmdError::ArgCount(0));
+            }
+
+            state.reload_data()
+                .map(|_| true)
+                .map_err(|e| CmdError::Command(format!("{}", e)))?
+        }
+
         "quit" | "exit" | "q" => false,
         _ => return Err(CmdError::UnknownCommand(cmd)),
     })
@@ -158,11 +168,11 @@ impl State {
             data: None,
         };
 
-        me.reload()?;
+        me.reload_data()?;
         Ok(me)
     }
 
-    pub fn reload(&mut self) -> Result<(), Error> {
+    pub fn reload_data(&mut self) -> Result<(), Error> {
         use std::fs::File;
         use crate::benc::load;
 
