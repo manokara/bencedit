@@ -986,7 +986,7 @@ impl<'a> ValueDisplay<'a> {
                         state = TraverseState::Done;
                     } else if let Some(m) = root.to_map() {
                         write!(f, "{{\n")?;
-                        dict_stack.push(m.iter().peekable());
+                        dict_stack.push(m.iter());
                         write!(f, "{:indent$}", "", indent = indent * indent_size)?;
                         indent += 1;
                         state = TraverseState::Dict;
@@ -1025,7 +1025,7 @@ impl<'a> ValueDisplay<'a> {
                                 write!(f, "{{}},\n")?;
                             } else if stack_count < STACK_LIMIT {
                                 write!(f, "{{\n")?;
-                                dict_stack.push(m.iter().peekable());
+                                dict_stack.push(m.iter());
                                 indent += 1;
                                 next_state.push(TraverseState::Dict);
                                 stack_count += 1;
@@ -1098,7 +1098,7 @@ impl<'a> ValueDisplay<'a> {
                                 write!(f, "{{}}")?;
                             } else if stack_count < STACK_LIMIT {
                                 write!(f, "{{\n")?;
-                                dict_stack.push(m.iter().peekable());
+                                dict_stack.push(m.iter());
                                 indent += 1;
                                 state = TraverseState::Dict;
                                 next_state.push(TraverseState::List);
