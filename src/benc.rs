@@ -86,7 +86,7 @@ pub enum Value {
     ListRef(Rc<RefCell<Vec<Value>>>),
 }
 
-pub struct ValueDisplay<'a>(&'a Value, usize);
+pub struct ValueDisplay<'a>(&'a Value, usize, usize, usize);
 
 pub fn load(stream: &mut (impl Read + Seek)) -> Result<Value, Error> {
     let file_size = stream.seek(SeekFrom::End(0))?;
@@ -708,6 +708,18 @@ impl Value {
         }
     }
 
+    /// Returns the internal display struct with the parameters given.
+    ///
+    /// # Arguments
+    ///
+    /// - `max_depth`: How deep down containers the display will show. Once `max_depth` is reached, the
+    /// container's contents will just be shown as '...'.
+    /// - `max_list_items`: The display will show up to `max_list_items` elements of lists, adding a '...' at the end.
+    /// - `indent_size`: How many spaces is an indentation
+    pub fn display<'a>(&'a self, max_depth: usize, max_list_items: usize, indent_size: usize) -> ValueDisplay<'a> {
+        ValueDisplay::new(self, max_depth, max_list_items, indent_size)
+    }
+
     /// Select a value inside this one if it is a container (dict or list).
     ///
     /// # Syntax
@@ -951,23 +963,20 @@ impl Value {
 }
 
 impl<'a> ValueDisplay<'a> {
-    pub fn new(root: &'a Value, indent_size: usize) -> Self {
-        Self(root, indent_size)
+    pub fn new(root: &'a Value, max_depth: usize, max_list_items: usize, indent_size: usize) -> Self {
+        Self(root, max_depth, max_list_items, indent_size)
     }
+}
 
-    pub fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        const RUN_LIMIT: usize = 2000;
-        const STACK_LIMIT: usize = 5;
-        const MAX_LIST_ITEMS: usize = 10;
-
-        let mut runs = 0;
+impl<'a> fmt::Display for ValueDisplay<'a> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         let mut indent = 0;
         let mut state = TraverseState::Root;
         let mut next_state = Vec::new();
         let mut dict_stack = Vec::new();
         let mut list_stack = Vec::new();
         let mut stack_count = 0;
-        let ValueDisplay(root, indent_size) = self;
+        let ValueDisplay(root, max_depth, max_list_items, indent_size) = self;
 
 
         while state != TraverseState::Done {
@@ -1021,7 +1030,7 @@ impl<'a> ValueDisplay<'a> {
                         } else if let Some(m) = val.to_map() {
                             if m.is_empty() {
                                 write!(f, "{{}},\n")?;
-                            } else if stack_count < STACK_LIMIT {
+                            } else if stack_count < *max_depth {
                                 write!(f, "{{\n")?;
                                 dict_stack.push(m.iter());
                                 indent += 1;
@@ -1033,7 +1042,7 @@ impl<'a> ValueDisplay<'a> {
                         } else if let Some(v) = val.to_vec() {
                             if v.is_empty() {
                                 write!(f, "[],\n")?;
-                            } else if stack_count < STACK_LIMIT {
+                            } else if stack_count < *max_depth {
                                 write!(f, "[")?;
                                 list_stack.push(v.iter().enumerate().peekable());
                                 state = TraverseState::List;
@@ -1066,7 +1075,7 @@ impl<'a> ValueDisplay<'a> {
                     let is_last = it.peek().is_none();
 
                     if let Some((index, val)) = next {
-                        if index == MAX_LIST_ITEMS {
+                        if index == *max_list_items {
                             let count = it.clone().count();
                             write!(f, "... {} more]", count - index)?;
                             let _ = list_stack.pop().ok_or(fmt::Error)?;
@@ -1094,7 +1103,7 @@ impl<'a> ValueDisplay<'a> {
                         } else if let Some(m) = val.to_map() {
                             if m.is_empty() {
                                 write!(f, "{{}}")?;
-                            } else if stack_count < STACK_LIMIT {
+                            } else if stack_count < *max_depth {
                                 write!(f, "{{\n")?;
                                 dict_stack.push(m.iter());
                                 indent += 1;
@@ -1107,7 +1116,7 @@ impl<'a> ValueDisplay<'a> {
                         } else if let Some(v) = val.to_vec() {
                             if v.is_empty() {
                                 write!(f, "[]")?;
-                            } else if stack_count < STACK_LIMIT {
+                            } else if stack_count < *max_depth {
                                 write!(f, "[")?;
                                 list_stack.push(v.iter().enumerate().peekable());
                                 next_state.push(TraverseState::List);
@@ -1139,13 +1148,6 @@ impl<'a> ValueDisplay<'a> {
                 // Done
                 _ => unreachable!(),
             }
-
-            runs += 1;
-
-            if runs == RUN_LIMIT {
-                write!(f, "\n<truncating as output would be too big...>")?;
-                break;
-            }
         }
 
         Ok(())
@@ -1154,7 +1156,7 @@ impl<'a> ValueDisplay<'a> {
 
 impl fmt::Display for Value {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        ValueDisplay::new(self, 2).fmt(f)
+        ValueDisplay::new(self, 5, 10, 2).fmt(f)
     }
 }
 
