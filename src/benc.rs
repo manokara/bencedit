@@ -958,6 +958,7 @@ impl<'a> ValueDisplay<'a> {
     pub fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         const RUN_LIMIT: usize = 2000;
         const STACK_LIMIT: usize = 5;
+        const MAX_LIST_ITEMS: usize = 10;
 
         let mut runs = 0;
         let mut indent = 0;
@@ -993,7 +994,7 @@ impl<'a> ValueDisplay<'a> {
                         stack_count += 1;
                     } else if let Some(v) = root.to_vec() {
                         write!(f, "[")?;
-                        list_stack.push(v.iter().peekable());
+                        list_stack.push(v.iter().enumerate().peekable());
                         state = TraverseState::List;
                         next_state.push(TraverseState::Done);
                         stack_count += 1;
@@ -1036,7 +1037,7 @@ impl<'a> ValueDisplay<'a> {
                                 write!(f, "[],\n")?;
                             } else if stack_count < STACK_LIMIT {
                                 write!(f, "[")?;
-                                list_stack.push(v.iter().peekable());
+                                list_stack.push(v.iter().enumerate().peekable());
                                 state = TraverseState::List;
                                 next_state.push(TraverseState::Dict);
                                 stack_count += 1;
@@ -1066,8 +1067,24 @@ impl<'a> ValueDisplay<'a> {
                     let next = it.next();
                     let is_last = it.peek().is_none();
 
-                    if let Some(val) = next {
-                        if let Some(i) = val.to_i64() {
+                    if let Some((index, val)) = next {
+                        if index == MAX_LIST_ITEMS {
+                            let count = it.clone().count();
+                            write!(f, "... {} more]", count - index)?;
+                            let _ = list_stack.pop().ok_or(fmt::Error)?;
+                            state = next_state.pop().ok_or(fmt::Error)?;
+                            stack_count -= 1;
+
+                            if state == TraverseState::Dict {
+                                write!(f, ",\n")?;
+                            } else if state == TraverseState::List {
+                                let count = list_stack.last().unwrap().clone().count();
+
+                                if count > 0 {
+                                    write!(f, ", ")?;
+                                }
+                            }
+                        } else if let Some(i) = val.to_i64() {
                             write!(f, "{}", i)?;
                             if !is_last { write!(f, ", ")? };
                         } else if let Some(s) = val.to_str() {
@@ -1094,7 +1111,7 @@ impl<'a> ValueDisplay<'a> {
                                 write!(f, "[]")?;
                             } else if stack_count < STACK_LIMIT {
                                 write!(f, "[")?;
-                                list_stack.push(v.iter().peekable());
+                                list_stack.push(v.iter().enumerate().peekable());
                                 next_state.push(TraverseState::List);
                                 stack_count += 1;
                             } else {
