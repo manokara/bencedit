@@ -623,8 +623,7 @@ fn repr_bytes(bytes: &[u8], truncate_at: usize) -> String {
     buf.push('"');
 
     if bytes.len() > truncate_at {
-        buf.push_str("... (");
-        buf.extend(format!("{} bytes)", bytes.len()).chars());
+        buf.extend(format!("... {} more bytes", bytes.len() - truncate_at).chars());
     }
 
     buf
