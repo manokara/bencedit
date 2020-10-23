@@ -952,7 +952,8 @@ impl<'a> ValueDisplay<'a> {
     }
 
     pub fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        const RUN_LIMIT: usize = 3000;
+        const RUN_LIMIT: usize = 2000;
+        const STACK_LIMIT: usize = 5;
 
         let mut runs = 0;
         let mut indent = 0;
@@ -960,6 +961,7 @@ impl<'a> ValueDisplay<'a> {
         let mut next_state = Vec::new();
         let mut dict_stack = Vec::new();
         let mut list_stack = Vec::new();
+        let mut stack_count = 0;
         let ValueDisplay(root, indent_size) = self;
 
 
@@ -1010,15 +1012,25 @@ impl<'a> ValueDisplay<'a> {
                             write!(f, "{}", repr_bytes(b, 8))?;
                             write!(f, ",\n")?;
                         } else if let Some(m) = val.to_map() {
-                            write!(f, "{{\n")?;
-                            dict_stack.push(m.iter().peekable());
-                            indent += 1;
-                            next_state.push(TraverseState::Dict);
+                            if stack_count < STACK_LIMIT {
+                                write!(f, "{{\n")?;
+                                dict_stack.push(m.iter().peekable());
+                                indent += 1;
+                                next_state.push(TraverseState::Dict);
+                                stack_count += 1;
+                            } else {
+                                write!(f, "{{...}},\n")?;
+                            }
                         } else if let Some(v) = val.to_vec() {
-                            write!(f, "[")?;
-                            list_stack.push(v.iter().peekable());
-                            state = TraverseState::List;
-                            next_state.push(TraverseState::Dict);
+                            if stack_count < STACK_LIMIT {
+                                write!(f, "[")?;
+                                list_stack.push(v.iter().peekable());
+                                state = TraverseState::List;
+                                next_state.push(TraverseState::Dict);
+                                stack_count += 1;
+                            } else {
+                                write!(f, "[...],\n")?;
+                            }
                         } else {
                             return Err(fmt::Error);
                         }
@@ -1052,15 +1064,25 @@ impl<'a> ValueDisplay<'a> {
                             write!(f, "{}", repr_bytes(b, 8))?;
                             if !is_last { write!(f, ", ")? };
                         } else if let Some(m) = val.to_map() {
-                            write!(f, "{{\n")?;
-                            dict_stack.push(m.iter().peekable());
-                            indent += 1;
-                            state = TraverseState::Dict;
-                            next_state.push(TraverseState::List);
+                            if stack_count < STACK_LIMIT {
+                                write!(f, "{{\n")?;
+                                dict_stack.push(m.iter().peekable());
+                                indent += 1;
+                                state = TraverseState::Dict;
+                                next_state.push(TraverseState::List);
+                                stack_count += 1;
+                            } else {
+                                write!(f, "{{...}}")?;
+                            }
                         } else if let Some(v) = val.to_vec() {
-                            write!(f, "[")?;
-                            list_stack.push(v.iter().peekable());
-                            next_state.push(TraverseState::List);
+                            if stack_count < STACK_LIMIT {
+                                write!(f, "[")?;
+                                list_stack.push(v.iter().peekable());
+                                next_state.push(TraverseState::List);
+                                stack_count += 1;
+                            } else {
+                                write!(f, "[...]")?;
+                            }
                         } else {
                             return Err(fmt::Error);
                         }
