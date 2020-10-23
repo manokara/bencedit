@@ -197,15 +197,26 @@ pub fn load(stream: &mut (impl Read + Seek)) -> Result<Value, Error> {
                 buf_index += 1;
             }
 
-            // Read dict key
+            // Read dict key or end the dict if it's empty
+            // Internally dict keys can be anything since BTreeMap's K type is Value, but here we only
+            // consider them to be strings.
+            // FIXME: Deny non-string tokens?
             State::DictKey => {
-                if buf_str.len() == 0 {
-                    state = State::Str;
-                    next_state.push(State::DictKey);
+                let c = **buf_chars.peek().unwrap();
+
+                if c == Token::End.into() {
+                    buf_chars.next();
+                    buf_index += 1;
+                    state = next_state.pop().ok_or(Error::StackUnderflow)?;
                 } else {
-                    key_stack[dict_i as usize] = Some(str_or_bytes(buf_str.clone()));
-                    buf_str.clear();
-                    state = State::DictVal;
+                    if buf_str.len() == 0 {
+                        state = State::Str;
+                        next_state.push(State::DictKey);
+                    } else {
+                        key_stack[dict_i as usize] = Some(str_or_bytes(buf_str.clone()));
+                        buf_str.clear();
+                        state = State::DictVal;
+                    }
                 }
             }
 
@@ -214,13 +225,6 @@ pub fn load(stream: &mut (impl Read + Seek)) -> Result<Value, Error> {
                 let c = **buf_chars.peek().ok_or(Error::Eof)?;
 
                 match c.try_into() {
-                    // End of dict
-                    Ok(Token::End) => {
-                        buf_chars.next();
-                        buf_index += 1;
-                        state = next_state.pop().ok_or(Error::StackUnderflow)?;
-                    }
-
                     // Dict value
                     Ok(Token::Dict) => {
                         let map = Rc::new(RefCell::new(BTreeMap::new()));
@@ -266,8 +270,8 @@ pub fn load(stream: &mut (impl Read + Seek)) -> Result<Value, Error> {
                         next_state.push(State::DictValStr);
                     }
 
-                    // Colon
-                    _ => return Err(Error::Syntax(real_index as usize, "Unexpected ':' token".into())),
+                    // Colon, End
+                    _ => return Err(Error::Syntax(real_index as usize, format!("Unexpected '{}' token", c))),
                 }
             }
 
@@ -1012,7 +1016,9 @@ impl<'a> ValueDisplay<'a> {
                             write!(f, "{}", repr_bytes(b, 8))?;
                             write!(f, ",\n")?;
                         } else if let Some(m) = val.to_map() {
-                            if stack_count < STACK_LIMIT {
+                            if m.is_empty() {
+                                write!(f, "{{}},\n")?;
+                            } else if stack_count < STACK_LIMIT {
                                 write!(f, "{{\n")?;
                                 dict_stack.push(m.iter().peekable());
                                 indent += 1;
@@ -1022,7 +1028,9 @@ impl<'a> ValueDisplay<'a> {
                                 write!(f, "{{...}},\n")?;
                             }
                         } else if let Some(v) = val.to_vec() {
-                            if stack_count < STACK_LIMIT {
+                            if v.is_empty() {
+                                write!(f, "[],\n")?;
+                            } else if stack_count < STACK_LIMIT {
                                 write!(f, "[")?;
                                 list_stack.push(v.iter().peekable());
                                 state = TraverseState::List;
@@ -1064,7 +1072,9 @@ impl<'a> ValueDisplay<'a> {
                             write!(f, "{}", repr_bytes(b, 8))?;
                             if !is_last { write!(f, ", ")? };
                         } else if let Some(m) = val.to_map() {
-                            if stack_count < STACK_LIMIT {
+                            if m.is_empty() {
+                                write!(f, "{{}}")?;
+                            } else if stack_count < STACK_LIMIT {
                                 write!(f, "{{\n")?;
                                 dict_stack.push(m.iter().peekable());
                                 indent += 1;
@@ -1075,7 +1085,9 @@ impl<'a> ValueDisplay<'a> {
                                 write!(f, "{{...}}")?;
                             }
                         } else if let Some(v) = val.to_vec() {
-                            if stack_count < STACK_LIMIT {
+                            if v.is_empty() {
+                                write!(f, "[]")?;
+                            } else if stack_count < STACK_LIMIT {
                                 write!(f, "[")?;
                                 list_stack.push(v.iter().peekable());
                                 next_state.push(TraverseState::List);
