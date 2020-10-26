@@ -54,6 +54,14 @@ enum TraverseState {
 }
 
 #[derive(Debug)]
+pub enum TraverseAction {
+    Enter,
+    Exit,
+    Continue,
+    Stop,
+}
+
+#[derive(Debug)]
 pub enum Error {
     Io(IoError),
     Empty,
@@ -62,6 +70,14 @@ pub enum Error {
     StackUnderflow,
     UnexpectedState,
     BigInt,
+}
+
+#[derive(Debug)]
+pub enum TraverseError<E = ()> {
+    NotContainer(String),
+    AtRoot,
+    End(String),
+    Aborted(String, E),
 }
 
 #[derive(Debug)]
@@ -637,6 +653,21 @@ impl Value {
         matches!(self, Value::List(_))
     }
 
+    /// Is the current value a container?
+    pub fn is_container(&self) -> bool {
+        self.is_dict() || self.is_list()
+    }
+
+    pub fn len(&self) -> usize {
+        match self {
+            Value::Int(i) => 0, // TODO: Use log10 to tell how big the number is?
+            Value::Str(s) => s.len(),
+            Value::Bytes(b) => b.len(),
+            Value::Dict(m) => m.len(),
+            Value::List(l) => l.len(),
+        }
+    }
+
     pub fn to_i64(&self) -> Option<i64> {
         if let Value::Int(v) = self {
             Some(*v)
@@ -721,100 +752,234 @@ impl Value {
     ///
     /// `context` will contain the selector up until where the error occurred.
     pub fn select(&self, mut selector: &str) -> Result<&Value, SelectError> {
-        if !self.is_dict() && !self.is_list() {
-            return Err(SelectError::Primitive("<root>".into()));
-        }
-
         if selector.is_empty() {
             return Ok(self);
         }
 
         let full_selector = &selector[..];
-        let mut state = TraverseState::Root;
-        let mut current_dict = None;
-        let mut current_list = None;
-        let mut value = self;
+        let mut is_dict = false;
+        let mut last_key = String::new();
+        let mut last_index = 0;
 
-        macro_rules! context {
-            () => {{
-                let c = &full_selector[..context!(pos)];
+        let result = self.traverse(|key, index, _root, value, _context| {
+            #[cfg(test)]
+            eprintln!("{:?} -- {:?}, {:?}, {:?}, {:?} | {:?}, {:?}, {:?}",
+                      selector, key, index, value, _context, is_dict, last_key, last_index);
 
-                if !c.is_empty() {
-                    c.into()
+            if let Some(current_key) = key {
+                let (sel, key) = Self::parse_key_selector(selector, full_selector)?;
+                last_key.replace_range(0.., &key);
+                is_dict = true;
+
+                if current_key == key {
+                    if sel.is_empty() {
+                        return Ok(TraverseAction::Stop);
+                    }
+
+                    selector = sel;
                 } else {
-                    "<root>".into()
+                    return Ok(TraverseAction::Continue);
                 }
-            }};
+            } else if let Some(current_index) = index {
+                let (sel, index) = Self::parse_index_selector(selector, full_selector)?;
+                last_index = index;
+                is_dict = false;
 
-            (pos) => {
-                full_selector.len() - selector.len() + 1;
-            };
+                if current_index == index {
+                    if sel.is_empty() {
+                        return Ok(TraverseAction::Stop);
+                    }
+
+                    selector = sel;
+                } else {
+                    return Ok(TraverseAction::Continue);
+                }
+            }
+
+            Ok(TraverseAction::Enter)
+        });
+
+        #[cfg(test)]
+        if result.is_ok() {
+            eprintln!("All is good: {:?}", result);
+            eprintln!("----------------------------");
         }
+
+        result.map_err(|e| match e {
+            TraverseError::NotContainer(ctx) => SelectError::Primitive(ctx),
+            TraverseError::Aborted(_, e) => e,
+            TraverseError::End(ctx) => if is_dict {
+                SelectError::Key(ctx, last_key)
+            } else {
+                SelectError::Index(ctx, last_index)
+            },
+            TraverseError::AtRoot => unreachable!(),
+        })
+    }
+
+    /// Traverse a container Value (dict or list) returning a reference Value.
+    pub fn traverse<'a, F, E>(&'a self, mut f: F) -> Result<&'a Value, TraverseError<E>>
+    where
+        F: FnMut(Option<&str>, Option<usize>, &'a Value, &'a Value, &str) -> Result<TraverseAction, E>,
+    {
+        if !self.is_dict() && !self.is_list() {
+            return Err(TraverseError::NotContainer("<root>".into()));
+        }
+
+        let mut state = TraverseState::Root;
+        let mut next_state = Vec::new();
+        let mut dict_stack = Vec::new();
+        let mut list_stack = Vec::new();
+        let mut context = String::new();
+        let mut value = None;
 
         while state != TraverseState::Done {
             match state {
                 TraverseState::Root => {
-                    if let Some(m) = value.to_map() {
+                    if let Some(m) = self.to_map() {
                         state = TraverseState::Dict;
-                        current_dict = Some(m.iter());
-                    } else if let Some(v) = value.to_vec() {
+                        dict_stack.push((self, m.iter().enumerate().peekable()));
+                        next_state.push(TraverseState::Done);
+                    } else if let Some(v) = self.to_vec() {
                         state = TraverseState::List;
-                        current_list = Some(v.iter());
+                        list_stack.push((self, v.iter().enumerate().peekable()));
+                        next_state.push(TraverseState::Done);
                     }
                 }
 
                 TraverseState::Dict => {
-                    if selector.chars().next().unwrap() == '[' {
-                        return Err(SelectError::Indexable(context!()));
-                    }
+                    let (root, it) = dict_stack.last_mut().unwrap();
+                    let next = it.next();
 
-                    let (rest, key) = Self::parse_key_selector(selector, full_selector)?;
-                    let val = current_dict.take().unwrap().find_map(|(k, v)| if k.eq(&key) {
-                        Some(v)
-                    } else {
-                        None
-                    });
-                    selector = rest;
+                    if let Some((_i, (key, val))) = next {
+                        let action = f(Some(key.as_str()), None, root, val, &context)
+                            .map_err(|e| TraverseError::Aborted(context.clone(), e))?;
 
-                    if let Some(val) = val {
-                        if selector.is_empty() {
-                            value = val;
-                            state = TraverseState::Done;
-                        } else if let Some(m) = val.to_map() {
-                            current_dict = Some(m.iter());
-                        } else if let Some(v) = val.to_vec() {
-                            current_list = Some(v.iter());
-                            state = TraverseState::List;
-                        } else {
-                            return Err(SelectError::Primitive(context!()));
+                        match action {
+                            TraverseAction::Enter => {
+                                context.extend(format!(".{}", key).chars());
+
+                                if val.is_dict() {
+                                    let map = val.to_map().unwrap();
+
+                                    dict_stack.push((val, map.iter().enumerate().peekable()));
+                                    next_state.push(TraverseState::Dict);
+                                } else if val.is_list() {
+                                    let vec = val.to_vec().unwrap();
+
+                                    list_stack.push((val, vec.iter().enumerate().peekable()));
+                                    next_state.push(TraverseState::Dict);
+                                    state = TraverseState::List;
+                                } else {
+                                    return Err(TraverseError::NotContainer(context));
+                                }
+                            }
+
+                            TraverseAction::Exit => {
+                                let is_done = *next_state.last().unwrap() == TraverseState::Done;
+
+                                if is_done {
+                                    return Err(TraverseError::AtRoot);
+                                }
+
+                                // TODO: Check for possible escaped dots
+                                let key_pos = context.rfind('.').unwrap();
+                                let _ = dict_stack.pop().unwrap();
+                                context.truncate(key_pos);
+                                state = next_state.pop().unwrap();
+                            }
+
+                            TraverseAction::Stop => {
+                                value = Some(val);
+                                state = TraverseState::Done;
+                            }
+
+                            TraverseAction::Continue => (),
                         }
                     } else {
-                        return Err(SelectError::Key(context!(), key.into()));
+                        let action = f(None, None, root, &Value::Int(0), &context)
+                            .map_err(|e| TraverseError::Aborted(context.clone(), e))?;
+
+                        match action {
+                            TraverseAction::Exit => {
+                                let is_done = *next_state.last().unwrap() == TraverseState::Done;
+
+                                if is_done {
+                                    return Err(TraverseError::AtRoot);
+                                }
+
+                                let _ = dict_stack.pop().unwrap();
+                                state = next_state.pop().unwrap();
+                            }
+
+                            _ => state = TraverseState::Done,
+                        }
                     }
                 }
 
                 TraverseState::List => {
-                    if selector.chars().next().unwrap()  == '.' {
-                        return Err(SelectError::Subscriptable(context!()));
-                    }
+                    let (root, it) = list_stack.last_mut().unwrap();
+                    let next = it.next();
 
-                    let (rest, index) = Self::parse_index_selector(selector, full_selector)?;
-                    selector = rest;
+                    if let Some((index, val)) = next {
+                        let action = f(None, Some(index), root, val, &context)
+                            .map_err(|e| TraverseError::Aborted(context.clone(), e))?;
 
-                    if let Some(val) = current_list.take().unwrap().nth(index) {
-                        if selector.is_empty() {
-                            value = val;
-                            state = TraverseState::Done;
-                        } else if let Some(m) = val.to_map() {
-                            current_dict = Some(m.iter());
-                            state = TraverseState::Dict;
-                        } else if let Some(v) = val.to_vec() {
-                            current_list = Some(v.iter());
-                        } else {
-                            return Err(SelectError::Primitive(context!()));
+                        match action {
+                            TraverseAction::Enter => {
+                                context.extend(format!("[{}]", index).chars());
+
+                                if let Some(map) = val.to_map() {
+                                    dict_stack.push((val, map.iter().enumerate().peekable()));
+                                    next_state.push(TraverseState::List);
+                                    state = TraverseState::Dict;
+                                } else if let Some(vec) = val.to_vec() {
+                                    list_stack.push((val, vec.iter().enumerate().peekable()));
+                                    next_state.push(TraverseState::List);
+                                } else {
+                                    return Err(TraverseError::NotContainer(context));
+                                }
+                            }
+
+                            TraverseAction::Exit => {
+                                let is_done = *next_state.last().unwrap() == TraverseState::Done;
+
+                                if is_done {
+                                    return Err(TraverseError::AtRoot);
+                                }
+
+                                // TODO: Check for possible escaped dots
+                                let key_pos = context.rfind('[').unwrap();
+                                let _ = list_stack.pop().unwrap();
+                                context.truncate(key_pos);
+                                state = next_state.pop().unwrap();
+                            }
+
+                            TraverseAction::Stop => {
+                                value = Some(val);
+                                state = TraverseState::Done;
+                            }
+
+                            TraverseAction::Continue => (),
                         }
                     } else {
-                        return Err(SelectError::Index(context!(), index));
+                        let action = f(None, None, root, &Value::Int(0), &context)
+                            .map_err(|e| TraverseError::Aborted(context.clone(), e))?;
+
+                        match action {
+                            TraverseAction::Exit => {
+                                let is_done = *next_state.last().unwrap() == TraverseState::Done;
+
+                                if is_done {
+                                    return Err(TraverseError::AtRoot);
+                                }
+
+                                let _ = list_stack.pop().unwrap();
+                                state = next_state.pop().unwrap();
+                            }
+
+                            _ => state = TraverseState::Done,
+                        }
                     }
                 }
 
@@ -823,7 +988,7 @@ impl Value {
             }
         }
 
-        Ok(value)
+        value.ok_or(TraverseError::End(context))
     }
 
     fn parse_key_selector<'a>(input: &'a str, full_input: &str) -> Result<(&'a str, String), SelectError> {
@@ -971,185 +1136,179 @@ impl<'a> ValueDisplay<'a> {
 impl<'a> fmt::Display for ValueDisplay<'a> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         let mut indent = 0;
-        let mut state = TraverseState::Root;
-        let mut next_state = Vec::new();
-        let mut dict_stack = Vec::new();
-        let mut list_stack = Vec::new();
-        let mut stack_count = 0;
+        let mut depth = 1;
+        let mut is_dict_stack = Vec::new();
+        let mut count_stack = Vec::new();
         let ValueDisplay{
             root, max_depth, max_list_items, max_root_bytes, max_bytes, indent_size
         } = self;
 
+        if root.is_dict() {
+            write!(f, "{{\n")?;
+            indent += 1;
+            is_dict_stack.push(true);
+        } else if root.is_list() {
+            write!(f, "[")?;
+            is_dict_stack.push(false);
+            count_stack.push(root.to_vec().unwrap().len());
+        }
 
-        while state != TraverseState::Done {
-            match state {
-                TraverseState::Root => {
-                    if let Some(i) = root.to_i64() {
-                        write!(f, "{}", i)?;
-                        state = TraverseState::Done;
-                    } else if let Some(s) = root.to_str() {
-                        write!(f, "{:?}", s)?;
-                        state = TraverseState::Done;
-                    } else if let Some(b) = root.to_bytes() {
-                        write!(f, "{}", repr_bytes(b, *max_root_bytes))?;
-                        state = TraverseState::Done;
-                    } else if let Some(m) = root.to_map() {
+        let result = root.traverse::<_, fmt::Error>(|key, index, root, value, _context| {
+            if let Some(key) = key {
+                write!(f, "{:indent$}", "", indent = indent * indent_size)?;
+                write!(f, "{:?}: ", key)?;
+
+                if let Some(i) = value.to_i64() {
+                    write!(f, "{},\n", i)?;
+                } else if let Some(s) = value.to_str() {
+                    write!(f, "{:?},\n", s)?;
+                } else if let Some(b) = value.to_bytes() {
+                    write!(f, "{},\n", repr_bytes(b, *max_bytes))?;
+                } else if value.is_dict() {
+                    if value.len() == 0 {
+                        write!(f, "{{}},\n")?;
+                    } else if depth < *max_depth {
                         write!(f, "{{\n")?;
-                        dict_stack.push(m.iter());
-                        write!(f, "{:indent$}", "", indent = indent * indent_size)?;
                         indent += 1;
-                        state = TraverseState::Dict;
-                        next_state.push(TraverseState::Done);
-                        stack_count += 1;
-                    } else if let Some(v) = root.to_vec() {
+                        depth += 1;
+                        is_dict_stack.push(true);
+
+                        return Ok(TraverseAction::Enter);
+                    } else {
+                        write!(f, "{{...}},\n")?;
+                    }
+                } else if value.is_list() {
+                    let count = value.len();
+
+                    if count == 0 {
+                        write!(f, "[],\n")?;
+                    } else if depth < *max_depth {
                         write!(f, "[")?;
-                        list_stack.push(v.iter().enumerate().peekable());
-                        state = TraverseState::List;
-                        next_state.push(TraverseState::Done);
-                        stack_count += 1;
+                        depth += 1;
+                        is_dict_stack.push(false);
+                        count_stack.push(count);
+
+                        return Ok(TraverseAction::Enter);
                     } else {
-                        return Err(fmt::Error);
+                        write!(f, "[...],\n")?;
                     }
                 }
+            } else if let Some(index) = index {
+                let count = *count_stack.last().unwrap();
+                let is_last = count == 1;
+                *count_stack.last_mut().unwrap() -= 1;
 
-                TraverseState::Dict => {
-                    let it = dict_stack.last_mut().unwrap();
-                    let next = it.next();
+                if index == *max_list_items {
+                    let count = root.len();
+                    write!(f, "... {} more]", count - index)?;
+                    let _ = is_dict_stack.pop().unwrap();
+                    let _ = count_stack.pop().unwrap();
+                    let is_dict = *is_dict_stack.last().unwrap();
+                    depth -= 1;
 
-                    if let Some((key, val)) = next {
-                        write!(f, "{:indent$}", "", indent = indent * indent_size)?;
-                        write!(f, "\"{}\": ", key)?;
-
-                        if let Some(i) = val.to_i64() {
-                            write!(f, "{}", i)?;
-                            write!(f, ",\n")?;
-                        } else if let Some(s) = val.to_str() {
-                            write!(f, "{:?}", s)?;
-                            write!(f, ",\n")?;
-                        } else if let Some(b) = val.to_bytes() {
-                            write!(f, "{}", repr_bytes(b, *max_bytes))?;
-                            write!(f, ",\n")?;
-                        } else if let Some(m) = val.to_map() {
-                            if m.is_empty() {
-                                write!(f, "{{}},\n")?;
-                            } else if stack_count < *max_depth {
-                                write!(f, "{{\n")?;
-                                dict_stack.push(m.iter());
-                                indent += 1;
-                                next_state.push(TraverseState::Dict);
-                                stack_count += 1;
-                            } else {
-                                write!(f, "{{...}},\n")?;
-                            }
-                        } else if let Some(v) = val.to_vec() {
-                            if v.is_empty() {
-                                write!(f, "[],\n")?;
-                            } else if stack_count < *max_depth {
-                                write!(f, "[")?;
-                                list_stack.push(v.iter().enumerate().peekable());
-                                state = TraverseState::List;
-                                next_state.push(TraverseState::Dict);
-                                stack_count += 1;
-                            } else {
-                                write!(f, "[...],\n")?;
-                            }
-                        } else {
-                            return Err(fmt::Error);
-                        }
-
+                    if is_dict {
+                        write!(f, ",\n")?;
                     } else {
-                        indent -= 1;
-                        write!(f, "{:indent$}", "", indent = indent * indent_size)?;
-                        write!(f, "}}")?;
-                        let _ = dict_stack.pop().ok_or(fmt::Error)?;
-                        state = next_state.pop().ok_or(fmt::Error)?;
-                        stack_count -= 1;
+                        let count = count_stack.last().unwrap();
 
-                        if state == TraverseState::Dict {
-                            write!(f, ",\n")?;
+                        if *count > 0 {
+                            write!(f, ", ")?;
                         }
                     }
-                }
 
-                TraverseState::List => {
-                    let it = list_stack.last_mut().unwrap();
-                    let next = it.next();
-                    let is_last = it.peek().is_none();
+                    return Ok(TraverseAction::Exit);
+                } else if let Some(i) = value.to_i64() {
+                    write!(f, "{}", i)?;
 
-                    if let Some((index, val)) = next {
-                        if index == *max_list_items {
-                            let count = it.clone().count();
-                            write!(f, "... {} more]", count - index)?;
-                            let _ = list_stack.pop().ok_or(fmt::Error)?;
-                            state = next_state.pop().ok_or(fmt::Error)?;
-                            stack_count -= 1;
+                    if !is_last {
+                        write!(f, ", ")?;
+                    }
+                } else if let Some(s) = value.to_str() {
+                    write!(f, "{:?}", s)?;
 
-                            if state == TraverseState::Dict {
-                                write!(f, ",\n")?;
-                            } else if state == TraverseState::List {
-                                let count = list_stack.last().unwrap().clone().count();
+                    if !is_last {
+                        write!(f, ", ")?;
+                    }
+                } else if let Some(b) = value.to_bytes() {
+                    write!(f, "{}", repr_bytes(b, *max_bytes))?;
 
-                                if count > 0 {
-                                    write!(f, ", ")?;
-                                }
-                            }
-                        } else if let Some(i) = val.to_i64() {
-                            write!(f, "{}", i)?;
-                            if !is_last { write!(f, ", ")? };
-                        } else if let Some(s) = val.to_str() {
-                            write!(f, "{:?}", s)?;
-                            if !is_last { write!(f, ", ")? };
-                        } else if let Some(b) = val.to_bytes() {
-                            write!(f, "{}", repr_bytes(b, *max_bytes))?;
-                            if !is_last { write!(f, ", ")? };
-                        } else if let Some(m) = val.to_map() {
-                            if m.is_empty() {
-                                write!(f, "{{}}")?;
-                            } else if stack_count < *max_depth {
-                                write!(f, "{{\n")?;
-                                dict_stack.push(m.iter());
-                                indent += 1;
-                                state = TraverseState::Dict;
-                                next_state.push(TraverseState::List);
-                                stack_count += 1;
-                            } else {
-                                write!(f, "{{...}}")?;
-                            }
-                        } else if let Some(v) = val.to_vec() {
-                            if v.is_empty() {
-                                write!(f, "[]")?;
-                            } else if stack_count < *max_depth {
-                                write!(f, "[")?;
-                                list_stack.push(v.iter().enumerate().peekable());
-                                next_state.push(TraverseState::List);
-                                stack_count += 1;
-                            } else {
-                                write!(f, "[...]")?;
-                            }
-                        } else {
-                            return Err(fmt::Error);
-                        }
+                    if !is_last {
+                        write!(f, ", ")?;
+                    }
+                } else if value.is_dict() {
+                    if value.len() == 0 {
+                        write!(f, "{{}}")?;
+                    } else if depth < *max_depth {
+                        write!(f, "{{\n")?;
+                        indent += 1;
+                        depth += 1;
+                        is_dict_stack.push(true);
+
+                        return Ok(TraverseAction::Enter);
                     } else {
-                        write!(f, "]")?;
-                        let _ = list_stack.pop().ok_or(fmt::Error)?;
-                        state = next_state.pop().ok_or(fmt::Error)?;
-                        stack_count -= 1;
+                        write!(f, "{{...}}")?;
+                    }
+                } else if value.is_list() {
+                    let count = value.len();
 
-                        if state == TraverseState::Dict {
-                            write!(f, ",\n")?;
-                        } else if state == TraverseState::List {
-                            let count = list_stack.last().unwrap().clone().count();
+                    if count == 0 {
+                        write!(f, "[]")?;
+                    } else if depth < *max_depth {
+                        write!(f, "[")?;
+                        depth += 1;
+                        is_dict_stack.push(false);
+                        count_stack.push(count);
 
-                            if count > 0 {
-                                write!(f, ", ")?;
-                            }
-                        }
+                        return Ok(TraverseAction::Enter);
+                    } else {
+                        write!(f, "[...]")?;
                     }
                 }
+            } else {
+                depth -= 1;
+                let was_dict = *is_dict_stack.last().unwrap();
 
-                // Done
-                _ => unreachable!(),
+                if was_dict {
+                    indent -= 1;
+                    write!(f, "{:indent$}", "", indent = indent * indent_size)?;
+                    write!(f, "}}")?;
+                } else {
+                    write!(f, "]")?;
+                    let _ = count_stack.pop().unwrap();
+                }
+
+                let _ = is_dict_stack.pop().unwrap();
+                let is_dict = is_dict_stack.last();
+
+                if let Some(&is_dict) = is_dict {
+                    if is_dict {
+                        write!(f, ",\n")?;
+                    } else {
+                        let count = count_stack.last().unwrap();
+
+                        if *count > 0 {
+                            write!(f, ", ")?;
+                        }
+                    }
+
+                    return Ok(TraverseAction::Exit);
+                }
             }
+
+            Ok(TraverseAction::Continue)
+        });
+
+        if let Err(TraverseError::NotContainer(_)) = result {
+            if let Some(i) = root.to_i64() {
+                write!(f, "{}", i)?;
+            } else if let Some(s) = root.to_str() {
+                write!(f, "{:?}", s)?;
+            } else if let Some(b) = root.to_bytes() {
+                write!(f, "{}", repr_bytes(b, *max_root_bytes))?;
+            }
+        } else if !matches!(result, Err(TraverseError::End(_))) ||
+          (matches!(result, Err(TraverseError::End(_))) && depth > 0) {
+            return Err(fmt::Error);
         }
 
         Ok(())
@@ -1193,6 +1352,12 @@ impl fmt::Display for SelectError {
 impl From<IoError> for Error {
     fn from(e: IoError) -> Self {
         Self::Io(e)
+    }
+}
+
+impl<E> Into<Result<TraverseAction, E>> for TraverseAction {
+    fn into(self) -> Result<Self, E> {
+        Ok(self)
     }
 }
 
