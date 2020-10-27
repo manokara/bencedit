@@ -3,7 +3,7 @@ use std::{
     io::{stdin, stdout, Error as IoError, Write},
     path::{Path, PathBuf},
 };
-use crate::benc::Value as BencValue;
+use bencode::Value as BencValue;
 
 pub enum Error {
     Io(IoError),
@@ -174,7 +174,7 @@ impl State {
 
     pub fn reload_data(&mut self) -> Result<(), Error> {
         use std::fs::File;
-        use crate::benc::load;
+        use bencode::load;
 
         let mut fp = File::open(&self.path)?;
         println!("Loading {}", self.path.display());
@@ -194,8 +194,8 @@ impl From<IoError> for Error {
     }
 }
 
-impl From<crate::benc::SelectError> for CmdError {
-    fn from(e: crate::benc::SelectError) -> Self {
+impl From<bencode::SelectError> for CmdError {
+    fn from(e: bencode::SelectError) -> Self {
         Self::Command(format!("{}", e))
     }
 }

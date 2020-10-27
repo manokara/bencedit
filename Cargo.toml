@@ -1,9 +1,9 @@
 [package]
 name = "bencedit"
-version = "0.2.0"
+version = "0.3.0"
 authors = ["Mark Nokalt <marknokalt@live.com>"]
 edition = "2018"
 
 [dependencies]
+bencode = { path = "../bencode" }
 clap = "2.33"
-nom = "5.1"

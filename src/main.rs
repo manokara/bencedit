@@ -1,7 +1,6 @@
 use clap::{App, Arg};
 
 mod batch;
-pub(crate) mod benc;
 mod interactive;
 
 pub fn main() {
@@ -48,4 +47,3 @@ pub fn main() {
         }
     }
 }
-
