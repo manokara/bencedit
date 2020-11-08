@@ -30,7 +30,8 @@ dependencies = [
 
 [[package]]
 name = "bencode"
-version = "0.6.0"
+version = "0.8.0"
+source = "git+https://github.com/manokara/bencode-rs?rev=v0.8.0#3b0cea81daff9acff553db3cab2bf840dca6c771"
 
 [[package]]
 name = "bitflags"
