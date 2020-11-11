@@ -89,6 +89,25 @@ fn interactive_cmd(state: &mut State, cmd: String, argbuf: &str) -> Result<bool,
             true
         }
 
+        "set" => {
+            use nanoserde::DeJson;
+
+            if args.len() != 2 {
+                return Err(CmdError::ArgCount(2));
+            }
+
+            let old_value = state.data.as_mut().unwrap().select_mut(&args[0])?;
+
+            match BencValue::deserialize_json(&args[1]) {
+                Ok(value) => *old_value = value,
+                Err(e) => return Err(CmdError::Command(
+                    format!("{}, at {}:{}", e.msg.trim_end(), e.line + 1, e.col)
+                )),
+            }
+
+            true
+        }
+
         "reload" => {
             if args.len() != 0 {
                 return Err(CmdError::ArgCount(0));

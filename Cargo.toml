@@ -5,5 +5,10 @@ authors = ["Mark Nokalt <marknokalt@live.com>"]
 edition = "2018"
 
 [dependencies]
-bencode = { git = "https://github.com/manokara/bencode-rs", rev = "v0.8.0" }
 clap = "2.33"
+nanoserde = "0.1"
+
+[dependencies.bencode]
+git = "https://github.com/manokara/bencode-rs"
+rev = "bbe68bf"
+features = ["json"]
