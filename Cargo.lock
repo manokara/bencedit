@@ -22,7 +22,7 @@ dependencies = [
 
 [[package]]
 name = "bencedit"
-version = "0.3.0"
+version = "0.1.0"
 dependencies = [
  "bencode",
  "clap",
@@ -31,8 +31,8 @@ dependencies = [
 
 [[package]]
 name = "bencode"
-version = "0.8.0"
-source = "git+https://github.com/manokara/bencode-rs?rev=bbe68bf#bbe68bf025a26009a58a9901847d7baaf3fe7ed0"
+version = "0.8.1"
+source = "git+https://github.com/manokara/bencode-rs?rev=v0.8.1#9ded86877db59e6c0fa56899a52fc92e1d634440"
 dependencies = [
  "nanoserde",
 ]
