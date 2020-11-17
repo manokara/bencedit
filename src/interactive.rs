@@ -11,6 +11,7 @@ pub enum Error {
 }
 
 enum CmdError {
+    Io(IoError),
     UnknownCommand(String),
     Command(String),
     ArgUnknownEscape(usize, char),
@@ -24,6 +25,7 @@ enum CmdError {
 struct State {
     path: PathBuf,
     data: Option<BencValue>,
+    changed: bool,
 }
 
 pub fn interactive<P>(file: P) -> Result<(), Error> where P: AsRef<Path> {
@@ -32,11 +34,14 @@ pub fn interactive<P>(file: P) -> Result<(), Error> where P: AsRef<Path> {
     let mut input_buffer = String::new();
 
     loop {
+        let indicator = if state.changed { " *" } else { "" };
+
         {
             let mut out = stdout();
-            out.write_all(b"bencedit> ")?;
+            out.write_all(format!("bencedit{}> ", indicator).as_bytes())?;
             out.flush()?;
         }
+
         stdin().read_line(&mut input_buffer)?;
         let input = input_buffer.trim();
         let space_at = input.find(' ');
@@ -96,10 +101,18 @@ fn interactive_cmd(state: &mut State, cmd: String, argbuf: &str) -> Result<bool,
                 return Err(CmdError::ArgCount(2));
             }
 
+            let old_hash = hash_value(state.data.as_ref().unwrap().select(&args[0])?);
             let old_value = state.data.as_mut().unwrap().select_mut(&args[0])?;
 
             match BencValue::deserialize_json(&args[1]) {
-                Ok(value) => *old_value = value,
+                Ok(value) => {
+                    let new_hash = hash_value(&value);
+                    *old_value = value;
+
+                    if new_hash != old_hash {
+                        state.changed = true;
+                    }
+                },
                 Err(e) => return Err(CmdError::Command(
                     format!("{}, at {}:{}", e.msg.trim_end(), e.line + 1, e.col)
                 )),
@@ -118,7 +131,51 @@ fn interactive_cmd(state: &mut State, cmd: String, argbuf: &str) -> Result<bool,
                 .map_err(|e| CmdError::Command(format!("{}", e)))?
         }
 
+        "save" => {
+            use std::fs::File;
+
+            if !state.changed {
+                println!("No changes to be saved.");
+                return Ok(true);
+            }
+
+            let path = &state.path.canonicalize()?;
+            let mut file = File::create(path)?;
+
+            println!("Saving...");
+            state.data.as_ref().unwrap().encode(&mut file)?;
+            state.changed = false;
+
+            true
+        }
+
+        "save-as" => {
+            use std::fs::File;
+
+            if args.len() > 1 {
+                return Err(CmdError::ArgCount(1));
+            }
+
+            let path = Path::new(&args[0]);
+            let confirm = if path.exists() {
+                prompt_confirm(&format!("Path {} exists. Overwrite?", path.display()))?
+            } else {
+                true
+            };
+
+            if confirm {
+                let mut file = File::create(path.clone())?;
+
+                println!("Saving to {}...", path.display());
+                state.data.as_ref().unwrap().encode(&mut file)?;
+                state.changed = false;
+            }
+
+            true
+        }
+
         "quit" | "exit" | "q" => false,
+
         _ => return Err(CmdError::UnknownCommand(cmd)),
     })
 }
@@ -180,11 +237,81 @@ fn parse_args(buf: &str) -> Result<Vec<String>, CmdError> {
     Ok(args)
 }
 
+fn prompt_confirm(prompt: &str) -> Result<bool, CmdError> {
+    let mut buffer = String::new();
+
+    {
+        let mut out = stdout();
+        out.write_all(prompt.as_bytes())?;
+        out.write_all(b" (y/N): ")?;
+        out.flush()?;
+    }
+
+    stdin().read_line(&mut buffer)?;
+    let input = buffer.trim().to_lowercase();
+
+    Ok(if let Some(c) = input.chars().next() {
+        match c {
+            'y' => true,
+            _ => false,
+        }
+    } else {
+        false
+    })
+}
+
+fn hash_value(root: &BencValue) -> u64 {
+    use std::{
+        collections::hash_map::DefaultHasher,
+        hash::{Hash, Hasher},
+    };
+    use bencode::TraverseAction;
+
+    let hasher = &mut DefaultHasher::new();
+
+    if let Some(i) = root.to_i64() {
+        i.hash(hasher);
+    } else if let Some(s) = root.to_bytes() {
+        s.hash(hasher);
+    } else if let Some(s) = root.to_str() {
+        s.hash(hasher);
+    } else {
+        let _ = root.traverse::<_, ()>(|key, index, parent, value, _| {
+            if let Some(value) = value {
+                if value.is_container() {
+                    return Ok(TraverseAction::Enter);
+                }
+
+                if let Some(key) = key {
+                    key.hash(hasher);
+                } else if let Some(index) = index {
+                    index.hash(hasher);
+                }
+
+                if let Some(i) = value.to_i64() {
+                    i.hash(hasher);
+                } else if let Some(s) = value.to_bytes() {
+                    s.hash(hasher);
+                } else if let Some(s) = value.to_str() {
+                    s.hash(hasher);
+                }
+            } else if parent != root {
+                return Ok(TraverseAction::Exit);
+            }
+
+            Ok(TraverseAction::Continue)
+        });
+    }
+
+    hasher.finish()
+}
+
 impl State {
     pub fn new<P: Into<PathBuf>>(path: P) -> Result<Self, Error> {
         let mut me = Self {
             path: path.into(),
             data: None,
+            changed: false,
         };
 
         me.reload_data()?;
@@ -213,6 +340,12 @@ impl From<IoError> for Error {
     }
 }
 
+impl From<IoError> for CmdError {
+    fn from(e: IoError) -> Self {
+        Self::Io(e)
+    }
+}
+
 impl From<bencode::SelectError> for CmdError {
     fn from(e: bencode::SelectError) -> Self {
         Self::Command(format!("{}", e))
@@ -222,6 +355,7 @@ impl From<bencode::SelectError> for CmdError {
 impl fmt::Display for CmdError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
+            Self::Io(e) => write!(f, "IO Error: {}", e),
             Self::UnknownCommand(name) => write!(f, "Unknown command '{}'", name),
             Self::Command(msg) => write!(f, "Command failed with: {}", msg),
             Self::ArgUnknownEscape(pos, c) => write!(f, "Unknown escape character '{}' at {}", c, pos + 1),
