@@ -122,9 +122,21 @@ fn interactive_cmd(state: &mut State, cmd: String, argbuf: &str) -> Result<bool,
                 return Err(CmdError::ArgCount(0));
             }
 
-            state.reload_data()
-                .map(|_| true)
-                .map_err(|e| CmdError::Command(format!("{}", e)))?
+            let confirm = if state.changed {
+                prompt_confirm("There were changes made, are you sure?")?
+            } else {
+                true
+            };
+
+            if confirm {
+                state.reload_data()
+                    .map(|_| true)
+                    .map_err(|e| CmdError::Command(format!("{}", e)))?;
+
+                state.changed = false;
+            }
+
+            true
         }
 
         "save" => {
