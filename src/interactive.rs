@@ -152,7 +152,7 @@ fn interactive_cmd(state: &mut State, cmd: String, argbuf: &str) -> Result<bool,
         "save-as" => {
             use std::fs::File;
 
-            if args.len() > 1 {
+            if args.len() != 1 {
                 return Err(CmdError::ArgCount(1));
             }
 
@@ -171,6 +171,26 @@ fn interactive_cmd(state: &mut State, cmd: String, argbuf: &str) -> Result<bool,
                 state.changed = false;
             }
 
+            true
+        }
+
+        "clear" => {
+            if args.len() > 1 {
+                return Err(CmdError::ArgCountMax(1));
+            }
+
+            let selector = args.iter().map(|s| s.as_str()).next().unwrap_or("");
+            let value = state.data.as_mut().unwrap().select_mut(selector)?;
+
+            match value {
+                BencValue::Dict(m) => m.clear(),
+                BencValue::List(v) => v.clear(),
+                BencValue::Str(s) => s.clear(),
+                BencValue::Bytes(v) => v.clear(),
+                BencValue::Int(i) => *i = 0,
+            }
+
+            state.changed = true;
             true
         }
 
