@@ -194,6 +194,39 @@ fn interactive_cmd(state: &mut State, cmd: String, argbuf: &str) -> Result<bool,
             true
         }
 
+        "remove" => {
+            if args.len() != 1 {
+                return Err(CmdError::ArgCount(1));
+            }
+
+            let selector = &args[0];
+            let _ = state.data.as_ref().unwrap().select(selector)?; // Syntax + exists + parent is container check
+
+            let (parent_selector, child_selector) = if let Some(i) = selector.rfind(|c| c == '.' || c == '[') {
+                (&selector[0..i], &selector[i..])
+            } else {
+                ("", "")
+            };
+
+            let parent = state.data.as_mut().unwrap().select_mut(parent_selector)?;
+
+            let (key, index) = if child_selector.starts_with('.') {
+                (&child_selector[1..], 0)
+            } else {
+                let end = child_selector.len() - 1;
+                ("", (&child_selector[1..end]).parse::<usize>().unwrap())
+            };
+
+            if let Some(m) = parent.to_map_mut() {
+                m.remove(key);
+            } else if let Some(v) = parent.to_vec_mut() {
+                v.remove(index);
+            }
+
+            state.changed = true;
+            true
+        }
+
         "quit" | "exit" | "q" => false,
 
         _ => return Err(CmdError::UnknownCommand(cmd)),
