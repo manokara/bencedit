@@ -227,6 +227,30 @@ fn interactive_cmd(state: &mut State, cmd: String, argbuf: &str) -> Result<bool,
             true
         }
 
+        "insert" => {
+            if args.len() != 3 {
+                return Err(CmdError::ArgCount(3));
+            }
+
+            let root = state.data.as_mut().unwrap();
+            value_insert(root, &args[0], Some(&args[1]), &args[2])?;
+            state.changed = true;
+
+            true
+        }
+
+        "append" => {
+            if args.len() != 2 {
+                return Err(CmdError::ArgCount(2));
+            }
+
+            let root = state.data.as_mut().unwrap();
+            value_insert(root, &args[0], None, &args[1])?;
+            state.changed = true;
+
+            true
+        }
+
         "quit" | "exit" | "q" => false,
 
         _ => return Err(CmdError::UnknownCommand(cmd)),
@@ -357,6 +381,47 @@ fn hash_value(root: &BencValue) -> u64 {
     }
 
     hasher.finish()
+}
+
+fn value_insert(root: &mut BencValue, selector: &str, ident: Option<&str>, value: &str) -> Result<(), CmdError> {
+    use nanoserde::DeJson;
+
+    let value = match BencValue::deserialize_json(value) {
+        Ok(value) => value,
+        Err(e) => return Err(CmdError::Command(
+            format!("{}, at {}:{}", e.msg.trim_end(), e.line + 1, e.col)
+        )),
+    };
+
+    let parent_len = root.select(selector)?.len();
+    let parent = root.select_mut(selector)?;
+
+    if let Some(m) = parent.to_map_mut() {
+        if ident.is_none() {
+            return Err(CmdError::Command("Appending can only be done on lists".into()));
+        }
+
+        m.insert(ident.unwrap().into(), value);
+    } else if let Some(v) = parent.to_vec_mut() {
+        let index = if let Some(ident) = ident {
+            match ident.parse::<usize>() {
+                Ok(i) => i,
+                Err(_) => return Err(CmdError::Command("Index is not a number".into())),
+            }
+        } else {
+            parent_len
+        };
+
+        if index > v.len() {
+            return Err(CmdError::Command("Index out of bounds".into()));
+        }
+
+        v.insert(index, value);
+    } else {
+        return Err(CmdError::Command("Value is not a container".into()));
+    }
+
+    Ok(())
 }
 
 impl State {
