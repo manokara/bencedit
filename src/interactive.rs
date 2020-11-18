@@ -83,13 +83,9 @@ fn interactive_cmd(state: &mut State, cmd: String, argbuf: &str) -> Result<bool,
             }
 
             let data = state.data.as_ref().unwrap();
-
-            if let Some(arg) = args.iter().next() {
-                let value = data.select(arg)?;
-                println!("{}", value);
-            } else {
-                println!("{}", data);
-            }
+            let selector = args.iter().next().map(|s| s.as_str()).unwrap_or("");
+            let value = data.select(selector)?;
+            println!("{}", value);
 
             true
         }
