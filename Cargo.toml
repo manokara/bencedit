@@ -10,5 +10,6 @@ nanoserde = "0.1"
 
 [dependencies.bencode]
 git = "https://github.com/manokara/bencode-rs"
-rev = "v0.8.1"
+rev = "ca14fb5"
 features = ["json"]
+

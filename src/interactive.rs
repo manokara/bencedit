@@ -203,6 +203,8 @@ fn interactive_cmd(state: &mut State, cmd: String, argbuf: &str) -> Result<bool,
         }
 
         "remove" => {
+            use bencode::ValueAccessor;
+
             if args.len() != 1 {
                 return Err(CmdError::ArgCount(1));
             }
@@ -218,42 +220,71 @@ fn interactive_cmd(state: &mut State, cmd: String, argbuf: &str) -> Result<bool,
 
             let parent = state.data.as_mut().unwrap().select_mut(parent_selector)?;
 
-            let (key, index) = if child_selector.starts_with('.') {
-                (&child_selector[1..], 0)
+            let a = if child_selector.starts_with('.') {
+                ValueAccessor::Key(&child_selector[1..])
             } else {
                 let end = child_selector.len() - 1;
-                ("", (&child_selector[1..end]).parse::<usize>().unwrap())
+                let index = child_selector[1..end]
+                    .parse::<usize>()
+                    .unwrap();
+
+                ValueAccessor::Index(index)
             };
 
-            if let Some(m) = parent.to_map_mut() {
-                m.remove(key);
-            } else if let Some(v) = parent.to_vec_mut() {
-                v.remove(index);
-            }
-
+            parent.remove(a)?;
             state.changed = true;
             true
         }
 
         "insert" => {
+            use bencode::ValueAccessor;
+            use nanoserde::DeJson;
+
             if args.len() != 3 {
                 return Err(CmdError::ArgCount(3));
             }
 
             let root = state.data.as_mut().unwrap();
-            value_insert(root, &args[0], Some(&args[1]), &args[2])?;
+            let container = root.select_mut(&args[0])?;
+
+            let value = match BencValue::deserialize_json(&args[2]) {
+                Ok(value) => value,
+                Err(e) => return Err(CmdError::Command(
+                    format!("{}, at {}:{}", e.msg.trim_end(), e.line + 1, e.col)
+                )),
+            };
+            let a: ValueAccessor = match &args[1].parse::<usize>() {
+                Ok(i) => (*i).into(),
+                Err(_) => (&args[1]).into(),
+            };
+            container.insert(a, value)?;
             state.changed = true;
 
             true
         }
 
         "append" => {
+            use nanoserde::DeJson;
+
             if args.len() != 2 {
                 return Err(CmdError::ArgCount(2));
             }
 
             let root = state.data.as_mut().unwrap();
-            value_insert(root, &args[0], None, &args[1])?;
+            let container = root.select_mut(&args[0])?;
+
+            if !container.is_list() {
+                return Err(CmdError::Command("Value is not a list".into()));
+            }
+
+            let value = match BencValue::deserialize_json(&args[1]) {
+                Ok(value) => value,
+                Err(e) => return Err(CmdError::Command(
+                    format!("{}, at {}:{}", e.msg.trim_end(), e.line + 1, e.col)
+                )),
+            };
+
+            container.push(value)?;
             state.changed = true;
 
             true
@@ -391,47 +422,6 @@ fn hash_value(root: &BencValue) -> u64 {
     hasher.finish()
 }
 
-fn value_insert(root: &mut BencValue, selector: &str, ident: Option<&str>, value: &str) -> Result<(), CmdError> {
-    use nanoserde::DeJson;
-
-    let value = match BencValue::deserialize_json(value) {
-        Ok(value) => value,
-        Err(e) => return Err(CmdError::Command(
-            format!("{}, at {}:{}", e.msg.trim_end(), e.line + 1, e.col)
-        )),
-    };
-
-    let parent_len = root.select(selector)?.len();
-    let parent = root.select_mut(selector)?;
-
-    if let Some(m) = parent.to_map_mut() {
-        if ident.is_none() {
-            return Err(CmdError::Command("Appending can only be done on lists".into()));
-        }
-
-        m.insert(ident.unwrap().into(), value);
-    } else if let Some(v) = parent.to_vec_mut() {
-        let index = if let Some(ident) = ident {
-            match ident.parse::<usize>() {
-                Ok(i) => i,
-                Err(_) => return Err(CmdError::Command("Index is not a number".into())),
-            }
-        } else {
-            parent_len
-        };
-
-        if index > v.len() {
-            return Err(CmdError::Command("Index out of bounds".into()));
-        }
-
-        v.insert(index, value);
-    } else {
-        return Err(CmdError::Command("Value is not a container".into()));
-    }
-
-    Ok(())
-}
-
 impl State {
     pub fn new<P: Into<PathBuf>>(path: P) -> Result<Self, Error> {
         let mut me = Self {
@@ -478,6 +468,12 @@ impl From<bencode::SelectError> for CmdError {
     }
 }
 
+impl From<bencode::UpdateError> for CmdError {
+    fn from(e: bencode::UpdateError) -> Self {
+        Self::Command(format!("{}", e))
+    }
+}
+
 impl fmt::Display for CmdError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
@@ -502,3 +498,4 @@ impl fmt::Display for Error {
         }
     }
 }
+

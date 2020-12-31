@@ -31,8 +31,8 @@ dependencies = [
 
 [[package]]
 name = "bencode"
-version = "0.8.1"
-source = "git+https://github.com/manokara/bencode-rs?rev=v0.8.1#9ded86877db59e6c0fa56899a52fc92e1d634440"
+version = "0.9.1"
+source = "git+https://github.com/manokara/bencode-rs?rev=ca14fb5#ca14fb554ffc14f41520f7fb7c2c9df7632ca023"
 dependencies = [
  "nanoserde",
 ]

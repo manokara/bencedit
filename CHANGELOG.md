@@ -18,6 +18,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Add bencode sample files
 - Add traverse functionality to bencode values
 - Add set command
+- Add save command
+- Add remove command
+- Add insert and append commands
+- Add clear command
 
 ### Changed
 
@@ -33,3 +37,4 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 [separate library]: https://github.com/manokara/bencode-rs
 
 [Unreleased]: https://github.com/manokara/bencedit/
+
