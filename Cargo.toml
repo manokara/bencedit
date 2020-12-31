@@ -7,6 +7,7 @@ edition = "2018"
 [dependencies]
 clap = "2.33"
 nanoserde = "0.1"
+rustyline = "7.1"
 
 [dependencies.bencode]
 git = "https://github.com/manokara/bencode-rs"

@@ -4,6 +4,10 @@ use std::{
     path::{Path, PathBuf},
 };
 use bencode::Value as BencValue;
+use rustyline::{
+    error::ReadlineError,
+    Editor,
+};
 
 pub enum Error {
     Io(IoError),
@@ -30,44 +34,63 @@ struct State {
 
 pub fn interactive<P>(file: P) -> Result<(), Error> where P: AsRef<Path> {
     let mut state = State::new(file.as_ref())?;
-
-    let mut input_buffer = String::new();
+    let mut rl = Editor::<()>::new();
 
     loop {
         let indicator = if state.changed { " *" } else { "" };
+        let readline = rl.readline(&format!("bencedit{}> ", indicator));
 
-        {
-            let mut out = stdout();
-            out.write_all(format!("bencedit{}> ", indicator).as_bytes())?;
-            out.flush()?;
-        }
+        match readline {
+            Ok(line) => {
+                let input = line.trim();
+                let space_at = input.find(' ');
+                rl.add_history_entry(input);
 
-        stdin().read_line(&mut input_buffer)?;
-        let input = input_buffer.trim();
-        let space_at = input.find(' ');
+                let (cmd, argbuf) = if let Some(space_at) = space_at {
+                    let s = input.split_at(space_at);
+                    (Some(s.0), s.1)
+                } else {
+                    (if input.len() > 0 { Some(input) } else { None }, "")
+                };
 
-        let (cmd, argbuf) = if let Some(space_at) = space_at {
-            let s = input.split_at(space_at);
-            (Some(s.0), s.1)
-        } else {
-            (if input.len() > 0 { Some(input) } else { None }, "")
-        };
+                if let Some(cmd) = cmd {
+                    let cmd = cmd.to_lowercase();
+                    let argbuf = if argbuf.len() > 0 {
+                        &argbuf[1..]
+                    } else {
+                        argbuf
+                    };
 
-        if let Some(cmd) = cmd {
-            let cmd = cmd.to_lowercase();
-            let argbuf = if argbuf.len() > 0 {
-                &argbuf[1..]
-            } else {
-                argbuf
-            };
+                    match interactive_cmd(&mut state, cmd, argbuf) {
+                        Ok(keep_running) => if !keep_running { break; },
+                        Err(e) => eprintln!("Error: {}", e),
+                    }
+                }
+            }
 
-            match interactive_cmd(&mut state, cmd, argbuf) {
-                Ok(keep_running) => if !keep_running { break; },
-                Err(e) => eprintln!("Error: {}", e),
+            Err(ReadlineError::Interrupted) => {}
+            Err(ReadlineError::Eof) => {
+                use std::fs::File;
+
+                if state.changed {
+                    let confirm = prompt_confirm("There were changes made, do you want to save them?")?;
+
+                    if confirm {
+                        let path = &state.path.canonicalize()?;
+                        let mut file = File::create(path)?;
+
+                        println!("Saving...");
+                        state.data.as_ref().unwrap().encode(&mut file)?;
+                    }
+                }
+
+                break
+            },
+            Err(e) => {
+                println!("ERROR: {:?}", e);
+                break
             }
         }
-
-        input_buffer.clear();
     }
 
     Ok(())
@@ -353,7 +376,7 @@ fn parse_args(buf: &str) -> Result<Vec<String>, CmdError> {
     Ok(args)
 }
 
-fn prompt_confirm(prompt: &str) -> Result<bool, CmdError> {
+fn prompt_confirm(prompt: &str) -> Result<bool, IoError> {
     let mut buffer = String::new();
 
     {
